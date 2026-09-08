@@ -1,0 +1,277 @@
+ROTAX 915 iS / SIH26054 — INITIAL ANOMALY SET
+
+Purpose:
+These are candidate anomalies for the simulator, digital twin, ML, and final demo.
+They are based mainly on the Rotax manuals already reviewed, with project-level modelling where explicitly noted.
+
+1. FUEL PRESSURE ANOMALY
+What happens:
+- Fuel rail pressure leaves the normal 2.9–3.2 bar range.
+- Short transients of 2.5–3.5 bar are only acceptable for up to about 3 seconds after a power-setting change.
+
+Possible telemetry effects:
+- fuel_pressure abnormal
+- fuel_flow may become unstable
+- EGT may change
+- power may become inconsistent with throttle/load
+- possible mission-risk increase
+
+Source status:
+SOURCE-BACKED for pressure limits.
+Detailed downstream fault behaviour may need modelling assumptions.
+
+2. COOLING DEGRADATION / OVERHEATING
+What happens:
+- Cooling efficiency decreases.
+- Coolant temperature rises faster than expected for the current load and environment.
+- Oil temperature may also rise.
+
+Possible telemetry effects:
+- coolant_temp residual increases
+- oil_temp increases
+- thermal trend becomes progressively worse
+- possible EGT changes under sustained load
+
+Source status:
+SOURCE-BACKED that cooling must remain within operating limits.
+Exact degradation rate/time constants are ASSUMPTION unless calibrated.
+
+3. COOLANT SENSOR FALSE-LOW / COOLANT-LOSS PLAUSIBILITY ANOMALY
+What happens:
+- Coolant is lost or the coolant temperature sensor is no longer fully immersed.
+- The sensor may read air temperature and incorrectly report a lower value.
+
+Possible telemetry effects:
+- measured coolant_temp drops or becomes implausibly low
+- physics twin still predicts elevated thermal state
+- measured-vs-expected residual becomes strongly negative
+- other temperatures may remain high
+
+Why useful:
+- Demonstrates why the digital twin is better than a simple threshold alarm.
+
+Source status:
+SOURCE-BACKED by the Rotax Installation Manual.
+
+4. GEARBOX / HIGH-FREQUENCY VIBRATION ANOMALY
+What happens:
+- Gearbox pitting or related mechanical degradation creates high-frequency vibration.
+
+Possible telemetry effects:
+- vibration RMS increases
+- high-frequency spectral energy increases
+- vibration trend worsens over time
+- RPM and temperatures may initially remain normal
+
+Source status:
+SOURCE-BACKED relationship between gearbox pitting and high-frequency vibration.
+Exact vibration amplitudes are TBD / ASSUMPTION.
+
+5. ECU LANE A / LANE B ANOMALY
+What happens:
+- One ECU lane becomes unavailable or degraded.
+
+Possible telemetry effects:
+- warning state changes
+- some sensor values may become unavailable depending on active lane
+- redundancy is reduced
+- engine may continue operating in a degraded configuration
+
+Source status:
+SOURCE-BACKED dual-lane EMS behaviour.
+
+6. DISPLAY CAN A / B ANOMALY
+What happens:
+- One Display CAN channel fails.
+
+Possible telemetry effects:
+- data still available through the remaining CAN channel
+- if both Display CAN channels fail, engine parameters may become unavailable to the monitoring system
+
+Source status:
+SOURCE-BACKED.
+
+7. GENERATOR / ELECTRICAL SUPPLY ANOMALY
+What happens:
+- Generator or electrical-output behaviour becomes abnormal.
+- EMS may switch supply paths depending on failure state.
+
+Possible telemetry effects:
+- bus/output voltage abnormal
+- caution state changes
+- generator_state changes
+- possible reduction in available airframe electrical power
+
+Source status:
+SOURCE-BACKED electrical/generator failover behaviour.
+Exact battery state-of-charge modelling is aircraft-side and not defined by the engine manuals.
+
+8. AIR-PATH / BOOST ANOMALY
+What happens:
+- Intake, intercooler, boost, throttle, or manifold behaviour deviates from expected conditions.
+
+Possible telemetry effects:
+- manifold_pressure residual increases
+- manifold_temperature residual increases
+- airflow differs from expected
+- power differs from expected
+- boost control may appear abnormal
+
+Useful Rotax-backed checks:
+- p_plenum deviation > +20 mbar at 5800 rpm / sea level can indicate an air-supply failure
+- T_plenum deviation > +5 °C at 5800 rpm / sea level can indicate an air-supply failure
+
+Source status:
+SOURCE-BACKED for those stated conditions.
+
+9. EGT IMBALANCE / CYLINDER COMBUSTION ANOMALY
+What happens:
+- One cylinder behaves differently from the others.
+
+Possible telemetry effects:
+- one EGT channel drifts
+- EGT_split increases
+- possible fuel/injector or combustion irregularity
+- possible power roughness
+
+Useful derived feature:
+EGT_split = max(EGT1, EGT2, EGT3, EGT4) - min(EGT1, EGT2, EGT3, EGT4)
+
+Source-backed limits:
+- <= 200 °C when fuel consumption > 3 L/h
+- <= 500 °C when fuel consumption < 3 L/h
+
+Source status:
+SOURCE-BACKED EGT split limits.
+Specific fault-to-EGT signature may need external data or assumptions.
+
+10. OIL PRESSURE ANOMALY
+What happens:
+- Oil pressure is too low, too high, or inconsistent with RPM and temperature.
+
+Possible telemetry effects:
+- oil_pressure residual abnormal
+- possible oil_temp increase
+- lubrication-health score decreases
+- fault confidence increases if sustained
+
+Useful limits:
+- normal range above 3500 rpm: 2.0–5.0 bar
+- minimum below 3500 rpm: 0.8 bar
+- cold-start / warm-up maximum: 7.0 bar
+
+Source status:
+SOURCE-BACKED limits.
+Exact degradation trajectory is ASSUMPTION unless calibrated.
+
+11. SENSOR DRIFT
+What happens:
+- A sensor gradually develops bias.
+
+Example:
+true coolant temp = 95 °C
+measured coolant temp = 95 → 97 → 100 → 104 °C
+
+Possible telemetry effects:
+- slowly increasing residual
+- no matching change in related physical variables
+- clustering may mark it as unusual
+- plausibility logic may flag disagreement between sensors / physics
+
+Source status:
+PROJECT-LEVEL anomaly.
+Sensor drift magnitude/rate must be labelled ASSUMPTION unless supported by data.
+
+12. SENSOR STUCK / DROPOUT
+What happens:
+- A sensor becomes frozen, missing, or invalid.
+
+Examples:
+- EGT_2 remains exactly constant
+- oil_pressure becomes NaN / missing
+- throttle signal stops updating
+
+Possible telemetry effects:
+- zero variance over time
+- missing-value flags
+- impossible rate-of-change behaviour
+- mismatch with physics predictions
+
+Source status:
+PROJECT-LEVEL anomaly, although sensor/channel availability issues are supported by Rotax documentation.
+
+13. FUEL FILTER RESTRICTION
+What happens:
+- Fine-filter contamination or restriction develops.
+
+Possible telemetry effects:
+- upstream pressure may increase
+- pressure fluctuation may increase
+- fuel delivery may become less stable
+
+Source status:
+SOURCE-BACKED by Installation Manual fault/installation guidance.
+Exact severity-to-telemetry mapping requires modelling.
+
+14. OVERBOOST / BOOST-CONTROL ANOMALY
+What happens:
+- Boost pressure becomes excessive or boost-control behaviour becomes abnormal.
+
+Possible telemetry effects:
+- boost pressure too high
+- manifold pressure too high
+- overboost-valve activity
+- power/airflow relationship abnormal
+
+Source status:
+SOURCE-BACKED system behaviour.
+Exact fault progression is a modelling choice.
+
+15. COMBINED THERMAL + LUBRICATION DEGRADATION
+What happens:
+- High oil temperature and worsening lubrication conditions appear together.
+
+Possible telemetry effects:
+- oil_temp rises
+- oil_pressure trend becomes abnormal
+- vibration may increase later
+- health score degrades progressively
+
+Source status:
+PARTLY SOURCE-BACKED.
+Detailed coupled degradation model is ASSUMPTION unless supported by external data.
+
+RECOMMENDED FIRST 4 FOR THE DEMO
+
+1. Cooling degradation
+2. Fuel pressure abnormality
+3. Increasing high-frequency vibration
+4. Sensor drift / false coolant reading
+
+WHY THESE 4:
+- They produce clearly different telemetry patterns.
+- They are easy to visualize.
+- They give clustering + Random Forest/XGBoost meaningful differences to learn.
+- They demonstrate physics-residual checking.
+- They cover thermal, fuel, mechanical, and sensor anomaly categories.
+
+IMPORTANT MODELLING RULE
+
+Do not implement anomalies as:
+if fault:
+    sensor += random_bad_number
+
+Prefer:
+fault changes underlying engine/system state
+        ↓
+engine physics responds
+        ↓
+true state changes
+        ↓
+sensor model produces telemetry
+        ↓
+digital twin compares actual vs expected
+        ↓
+ML detects anomaly / trend / fault
+
+This makes the system much more defensible.
