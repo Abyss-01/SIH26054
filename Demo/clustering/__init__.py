@@ -1,3 +1,3 @@
-from .visualizer import generate_trained_cluster_baseline, render_clustering_visualizer
+from .visualizer import render_clustering_visualizer
 
-__all__ = ["generate_trained_cluster_baseline", "render_clustering_visualizer"]
+__all__ = ["render_clustering_visualizer"]

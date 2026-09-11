@@ -1,215 +1,189 @@
+"""Reproducible synthetic sensor windows for the interactive demonstration.
+
+Stage targets, fault shapes and tolerances are illustrative assumptions. They
+are not a validated engine model, manufacturer limits or maintenance advice.
 """
-Physics-Based Telemetry Data Generator
-Generates realistic 1 Hz time-series data for Rotax 915 iS engine parameters
-across 7 flight stages and 7 technical manual anomaly profiles.
-"""
+
+from numbers import Integral, Real
 
 import numpy as np
 import pandas as pd
-import streamlit as st
 
-@st.cache_data(show_spinner=False)
-def generate_telemetry_data(scenario_key: str, noise_level: float = 1.0, flight_stage: str = "4. Cruise") -> dict:
+from config.engine_specs import stage_reference_bands
+from config.scenarios import FLIGHT_STAGES, SCENARIO_OPTIONS, resolve_scenario
+
+
+WINDOW_SECONDS = 30
+ANOMALY_ONSET_SECONDS = 8
+ANOMALY_THRESHOLD = 1.0
+EGT_COLUMNS = [f"EGT Cyl {cylinder} (°C)" for cylinder in range(1, 5)]
+
+
+def _to_frame(signals: dict[str, np.ndarray]) -> pd.DataFrame:
+    """Use displayed precision for both scoring and downstream comparisons."""
+    df = pd.DataFrame(signals)
+    for column in df:
+        if column == "Time (s)":
+            continue
+        df[column] = df[column].round(1 if "RPM" in column or "°C" in column else 2)
+    df["EGT Avg (°C)"] = df[EGT_COLUMNS].mean(axis=1).round(1)
+    df["EGT Spread (°C)"] = (df[EGT_COLUMNS].max(axis=1) - df[EGT_COLUMNS].min(axis=1)).round(1)
+    return df
+
+
+def score_telemetry(df: pd.DataFrame, flight_stage: str) -> dict:
+    """Measure departures from stage reference bands without knowing a fault label.
+
+    A channel score of 1 is one demo tolerance away from its stage target.
+    The sample score is the largest channel score. The 95th percentile and
+    fraction of samples outside bands determine the illustrative fit score.
     """
-    Generates 30 seconds of realistic telemetry data for any flight stage / Rotax 915 anomaly.
-    Returns dictionary containing telemetry DataFrame and health status metadata.
-    """
-    np.random.seed(42)
-    time_steps = 30
-    t = np.arange(time_steps)
-    
-    sine_fast = np.sin(2 * np.pi * t / 5.0) * 0.3
-    sine_slow = np.cos(2 * np.pi * t / 15.0) * 0.5
-    
-    # Base defaults by flight stage
-    if flight_stage == "1. Warm-Up (ground)":
-        rpm_target = 2200.0
-        egt_target = 760.0
-        cht_target = 65.0
-        map_target = 30.0
-        fuel_p_target = 3.0
-        oil_p_target = 4.8  # Cold oil higher pressure
-        vib_target = 1.6
-    elif flight_stage == "2. Take-Off":
-        rpm_target = 5800.0  # Max power (104 kW)
-        egt_target = 850.0
-        cht_target = 115.0
-        map_target = 44.5  # Full boost
-        fuel_p_target = 3.1
-        oil_p_target = 4.2
-        vib_target = 2.2
-    elif flight_stage == "3. Climb":
-        rpm_target = 5600.0
-        egt_target = 835.0
-        cht_target = 112.0
-        map_target = 42.0
-        fuel_p_target = 3.05
-        oil_p_target = 4.1
-        vib_target = 2.1
-    elif flight_stage == "4. Cruise":
-        rpm_target = 5400.0  # Continuous power (99 kW)
-        egt_target = 800.0
-        cht_target = 108.0
-        map_target = 40.0
-        fuel_p_target = 3.0
-        oil_p_target = 4.0
-        vib_target = 2.0
-    elif flight_stage == "5. Loiter / Endurance":
-        rpm_target = 4900.0  # Fuel efficient ECO mode
-        egt_target = 780.0
-        cht_target = 102.0
-        map_target = 36.0
-        fuel_p_target = 3.0
-        oil_p_target = 3.9
-        vib_target = 1.8
-    elif flight_stage == "6. Descent / Return":
-        rpm_target = 3900.0
-        egt_target = 760.0
-        cht_target = 98.0
-        map_target = 32.0
-        fuel_p_target = 2.95
-        oil_p_target = 3.8
-        vib_target = 1.7
-    else:  # 7. Landing / Cooldown
-        rpm_target = 2000.0
-        egt_target = 740.0
-        cht_target = 90.0
-        map_target = 29.0
-        fuel_p_target = 2.95
-        oil_p_target = 3.7
-        vib_target = 1.5
-
-    # Generate signal curves with noise
-    rpm_base = rpm_target + sine_slow * 25.0 + np.random.normal(0, 15.0 * noise_level, time_steps)
-    egt_cyl1_base = egt_target - 2.0 + sine_fast * 3.0 + np.random.normal(0, 2.0 * noise_level, time_steps)
-    egt_cyl2_base = egt_target + 2.0 + sine_slow * 3.0 + np.random.normal(0, 2.5 * noise_level, time_steps)
-    egt_cyl3_base = egt_target - 5.0 + sine_fast * 2.5 + np.random.normal(0, 2.0 * noise_level, time_steps)
-    egt_cyl4_base = egt_target + 5.0 + sine_slow * 2.8 + np.random.normal(0, 2.2 * noise_level, time_steps)
-    cht_base = cht_target + sine_slow * 1.5 + np.random.normal(0, 0.8 * noise_level, time_steps)
-    map_base = map_target + sine_slow * 0.4 + np.random.normal(0, 0.25 * noise_level, time_steps)
-    fuel_p_base = fuel_p_target + np.random.normal(0, 0.03 * noise_level, time_steps)
-    oil_base = oil_p_target + sine_fast * 0.05 + np.random.normal(0, 0.04 * noise_level, time_steps)
-    vib_base = vib_target + sine_fast * 0.1 + np.random.normal(0, 0.05 * noise_level, time_steps)
-
-    # Nominal default state
-    health = 98.0
-    rul_hours = 140.0
-    status_label = "NORMAL"
-    status_class = "status-normal"
-    status_desc = f"Nominal Operating Profile — {flight_stage}"
-    cluster_text = "Cluster 0 (Nominal Envelope)"
-    cluster_sub = "🟢 Inside Normal Physics Range"
-    cluster_color = "#3fb950"
-    is_outlier = False
-
-    # Apply Selected Rotax 915 iS Anomaly Profile (from rotax_915is_anomalies.txt)
-    if scenario_key == "1. Fuel Pressure Anomaly (2.5 - 3.5 bar instability)":
-        health = 68.0
-        rul_hours = 32.0
-        status_label = "WARNING"
-        status_class = "status-warning"
-        status_desc = "Fuel Rail Pressure Out of Bounds (2.9 - 3.2 bar limit)"
-        cluster_text = "OUTLIER / ANOMALY DETECTED"
-        cluster_sub = "🔴 Fuel Rail Transients > 3.2 bar"
-        cluster_color = "#f85149"
-        is_outlier = True
-        fuel_p_base = np.linspace(2.9, 2.4, time_steps) + np.random.normal(0, 0.25 * noise_level, time_steps)
-        egt_cyl1_base += np.random.normal(0, 18.0, time_steps)
-        egt_cyl2_base += np.random.normal(0, 18.0, time_steps)
-
-    elif scenario_key == "2. Cooling Degradation / Thermal Overheating":
-        health = 52.0
-        rul_hours = 18.0
-        status_label = "WARNING"
-        status_class = "status-warning"
-        status_desc = "Coolant Thermal Efficiency Degradation — CHT Rising Fast"
-        cluster_text = "OUTLIER / ANOMALY DETECTED"
-        cluster_sub = "🔴 Thermal Trend Residual Violation"
-        cluster_color = "#f85149"
-        is_outlier = True
-        cht_base = np.linspace(cht_target, 126.0, time_steps) + np.random.normal(0, 1.2 * noise_level, time_steps)
-        oil_base -= np.linspace(0, 0.6, time_steps)
-
-    elif scenario_key == "3. Coolant Sensor Drift / False-Low Reading":
-        health = 74.0
-        rul_hours = 42.0
-        status_label = "WARNING"
-        status_class = "status-warning"
-        status_desc = "Plausibility Anomaly: Measured CHT Drops Implausibly to 45°C Air Temp"
-        cluster_text = "OUTLIER / ANOMALY DETECTED"
-        cluster_sub = "🔴 Physics Twin vs Sensor Residual Mismatch"
-        cluster_color = "#d29922"
-        is_outlier = True
-        cht_base = np.linspace(cht_target, 45.0, time_steps) + np.random.normal(0, 0.5 * noise_level, time_steps)
-
-    elif scenario_key == "4. Gearbox High-Frequency Vibration Anomaly":
-        health = 62.0
-        rul_hours = 24.0
-        status_label = "WARNING"
-        status_class = "status-warning"
-        status_desc = "Mechanical Degradation: Gearbox Pitting High-Frequency Vibration"
-        cluster_text = "OUTLIER / ANOMALY DETECTED"
-        cluster_sub = "🔴 Vibration RMS Exceeds 2.5 G Ceiling"
-        cluster_color = "#f85149"
-        is_outlier = True
-        vib_base = np.linspace(2.0, 3.4, time_steps) + np.random.normal(0, 0.25 * noise_level, time_steps)
-
-    elif scenario_key == "5. EGT Cylinder 2 Combustion Imbalance":
-        health = 70.0
-        rul_hours = 35.0
-        status_label = "WARNING"
-        status_class = "status-warning"
-        status_desc = "Cylinder Combustion Anomaly: EGT Cyl 2 Peak Spikes Above 870°C"
-        cluster_text = "OUTLIER / ANOMALY DETECTED"
-        cluster_sub = "🔴 EGT Split > 200°C Limit"
-        cluster_color = "#f85149"
-        is_outlier = True
-        egt_cyl2_base = np.linspace(egt_target, 885.0, time_steps) + np.random.normal(0, 3.0 * noise_level, time_steps)
-
-    elif scenario_key == "6. Oil Pressure Loss / Lubrication Degradation":
-        health = 28.0
-        rul_hours = 4.0
-        status_label = "CRITICAL"
-        status_class = "status-critical"
-        status_desc = "Hydraulic Failure: Lubrication Oil Pressure Drops Below 2.0 bar"
-        cluster_text = "OUTLIER / ANOMALY DETECTED"
-        cluster_sub = "🔴 Hydraulic Seizure Risk"
-        cluster_color = "#f85149"
-        is_outlier = True
-        oil_base = np.linspace(3.8, 1.1, time_steps) + np.random.normal(0, 0.05 * noise_level, time_steps)
-        cht_base += np.linspace(0, 14.0, time_steps)
-        vib_base += np.linspace(0, 0.8, time_steps)
-
-    elif scenario_key == "7. Turbocharger Boost Air-Path Collapse":
-        health = 42.0
-        rul_hours = 11.0
-        status_label = "CRITICAL"
-        status_class = "status-critical"
-        status_desc = "Pneumatic Anomaly: Turbocharger MAP Collapses Below 35 inHg"
-        cluster_text = "OUTLIER / ANOMALY DETECTED"
-        cluster_sub = "🔴 Boost Plenum Loss"
-        cluster_color = "#f85149"
-        is_outlier = True
-        map_base = np.linspace(map_target, 24.0, time_steps) + np.random.normal(0, 0.3 * noise_level, time_steps)
-        rpm_base -= np.linspace(0, 600, time_steps)
-
-    df = pd.DataFrame({
-        "Time (s)": t,
-        "Engine RPM": np.round(rpm_base, 1),
-        "EGT Cyl 1 (°C)": np.round(egt_cyl1_base, 1),
-        "EGT Cyl 2 (°C)": np.round(egt_cyl2_base, 1),
-        "EGT Cyl 3 (°C)": np.round(egt_cyl3_base, 1),
-        "EGT Cyl 4 (°C)": np.round(egt_cyl4_base, 1),
-        "EGT Avg (°C)": np.round((egt_cyl1_base + egt_cyl2_base + egt_cyl3_base + egt_cyl4_base) / 4.0, 1),
-        "CHT (°C)": np.round(cht_base, 1),
-        "MAP (inHg)": np.round(map_base, 2),
-        "Fuel Pressure (bar)": np.round(fuel_p_base, 2),
-        "Oil Pressure (bar)": np.round(oil_base, 2),
-        "Vibration (G)": np.round(vib_base, 2)
-    })
-    
+    bands = stage_reference_bands(flight_stage)
+    missing = set(bands) - set(df.columns)
+    if missing:
+        raise ValueError(f"Missing telemetry channels: {', '.join(sorted(missing))}")
+    if df.empty or not np.isfinite(df[list(bands)].to_numpy(dtype=float)).all():
+        raise ValueError("Telemetry must contain finite measurements and at least one sample.")
+    channel_scores = pd.DataFrame(
+        {
+            column: (df[column] - band["nominal"]).abs() / band["tolerance"]
+            for column, band in bands.items()
+        },
+        index=df.index,
+    )
+    scores = channel_scores.max(axis=1).to_numpy(dtype=float, copy=True)
+    # Compare measured values to band edges to avoid floating-point roundoff at
+    # an exact boundary (for example abs(3.15 - 3.0) / 0.15).
+    outside = pd.DataFrame(
+        {
+            column: (df[column] < band["min"]) | (df[column] > band["max"])
+            for column, band in bands.items()
+        },
+        index=df.index,
+    )
+    outlier_mask = outside.any(axis=1).to_numpy(dtype=bool)
+    # Keep the documented score threshold and mask equivalent at exact edges.
+    scores[~outlier_mask] = np.minimum(scores[~outlier_mask], ANOMALY_THRESHOLD)
+    count = int(outlier_mask.sum())
+    fraction = float(outlier_mask.mean())
+    severity = float(np.percentile(scores, 95))
+    health = round(float(np.clip(100 - 12 * max(severity - 0.5, 0) - 35 * fraction, 0, 100)), 1)
+    status = "CRITICAL" if count and severity >= 3.0 else "WARNING" if count else "NORMAL"
+    color = {"NORMAL": "#3fb950", "WARNING": "#d29922", "CRITICAL": "#f85149"}[status]
+    dominant = str(channel_scores.quantile(0.95).idxmax())
+    peak_spread = float(df["EGT Spread (°C)"].max())
+    if count:
+        description = f"{count}/{len(df)} samples outside demo reference bands · strongest departure: {dominant}"
+        cluster_text = "REFERENCE DEPARTURE"
+        cluster_sub = f"95th-percentile deviation {severity:.2f}× tolerance"
+    else:
+        description = f"All {len(df)} samples within demo reference bands for {flight_stage.split('. ', 1)[-1]}"
+        cluster_text = "WITHIN REFERENCE"
+        cluster_sub = f"Peak EGT spread {peak_spread:.1f} °C · no flagged samples"
     return {
-        "df": df, "health": health, "rul": rul_hours,
-        "status_label": status_label, "status_class": status_class, "status_desc": status_desc,
-        "cluster_text": cluster_text, "cluster_sub": cluster_sub, "cluster_color": cluster_color, "is_outlier": is_outlier
+        "health": health,
+        "rul": None,
+        "status_label": status,
+        "status_class": f"status-{status.lower()}",
+        "status_desc": description,
+        "cluster_text": cluster_text,
+        "cluster_sub": cluster_sub,
+        "cluster_color": color,
+        "is_outlier": bool(count),
+        "outlier_mask": outlier_mask,
+        "anomaly_scores": scores,
+        "anomaly_threshold": ANOMALY_THRESHOLD,
+        "outlier_count": count,
+        "outlier_fraction": fraction,
+        "severity_score": severity,
+        "dominant_channel": dominant,
+        "peak_egt_spread": peak_spread,
+        "channel_scores": channel_scores,
+        "reference_bands": bands,
+    }
+
+
+def generate_telemetry_data(
+    scenario_key: str,
+    noise_level: float = 1.0,
+    flight_stage: str = "4. Cruise",
+    seed: int = 42,
+) -> dict:
+    """Generate a 30-s window and its matching nominal comparison window.
+
+    ``noise_level`` supports 0–5; zero removes random sensor noise. A local
+    generator preserves callers' NumPy random state. ``baseline_df`` shares
+    exactly the same nominal noise as ``df``, allowing fair fault comparisons.
+    Fault injections begin at sample 8 and develop through the window.
+    ``rul`` is retained as None for compatibility: no life prediction is made.
+    """
+    if not isinstance(flight_stage, str) or flight_stage not in FLIGHT_STAGES:
+        raise ValueError(f"Unknown flight stage: {flight_stage!r}")
+    if not isinstance(scenario_key, str) or scenario_key not in SCENARIO_OPTIONS:
+        raise ValueError(f"Unknown scenario: {scenario_key!r}")
+    if isinstance(noise_level, bool) or not isinstance(noise_level, Real) or not np.isfinite(noise_level) or not 0 <= noise_level <= 5:
+        raise ValueError("noise_level must be a finite number between 0 and 5.")
+    if isinstance(seed, bool) or not isinstance(seed, Integral) or not 0 <= seed <= 2**32 - 1:
+        raise ValueError("seed must be an integer between 0 and 4294967295.")
+
+    scenario_key = resolve_scenario(scenario_key, flight_stage)
+    rng = np.random.default_rng(int(seed))
+    bands = stage_reference_bands(flight_stage)
+    t = np.arange(WINDOW_SECONDS)
+    fast = np.sin(2 * np.pi * t / 5.0) * 0.3
+    slow = np.cos(2 * np.pi * t / 15.0) * 0.5
+    waveforms = {
+        "Engine RPM": (slow * 25.0, 15.0),
+        "EGT Cyl 1 (°C)": (fast * 3.0, 2.0),
+        "EGT Cyl 2 (°C)": (slow * 3.0, 2.5),
+        "EGT Cyl 3 (°C)": (fast * 2.5, 2.0),
+        "EGT Cyl 4 (°C)": (slow * 2.8, 2.2),
+        "CHT (°C)": (slow * 1.5, 0.8),
+        "MAP (inHg)": (slow * 0.4, 0.25),
+        "Fuel Pressure (bar)": (np.zeros(WINDOW_SECONDS), 0.03),
+        "Oil Pressure (bar)": (fast * 0.05, 0.04),
+        "Vibration (G)": (fast * 0.1, 0.05),
+    }
+    signals = {"Time (s)": t}
+    for channel, (wave, sigma) in waveforms.items():
+        signals[channel] = bands[channel]["nominal"] + wave + rng.normal(0, sigma * noise_level, WINDOW_SECONDS)
+    baseline = _to_frame(signals)
+    observed = {channel: values.copy() for channel, values in signals.items()}
+    ramp = np.clip((t - (ANOMALY_ONSET_SECONDS - 1)) / (WINDOW_SECONDS - ANOMALY_ONSET_SECONDS), 0, 1)
+
+    # These scripted perturbations illustrate correlated sensor changes; they
+    # do not establish a causal diagnosis or simulate high-frequency dynamics.
+    if scenario_key == SCENARIO_OPTIONS[2]:  # Fuel instability
+        observed["Fuel Pressure (bar)"] += ramp * (-0.6 + 0.22 * np.sin(t * 1.6))
+        observed["EGT Cyl 1 (°C)"] += ramp * 18 * np.sin(t * 1.3)
+        observed["EGT Cyl 2 (°C)"] += ramp * 18 * np.cos(t * 1.1)
+    elif scenario_key == SCENARIO_OPTIONS[3]:  # Rising temperature
+        observed["CHT (°C)"] += ramp * 22
+        observed["Oil Pressure (bar)"] -= ramp * 0.6
+    elif scenario_key == SCENARIO_OPTIONS[4]:  # Temperature measurement drift
+        observed["CHT (°C)"] -= ramp * (bands["CHT (°C)"]["nominal"] - 45.0)
+    elif scenario_key == SCENARIO_OPTIONS[5]:  # Increasing vibration magnitude
+        observed["Vibration (G)"] += ramp * (1.4 + 0.15 * np.sin(t * 1.9))
+    elif scenario_key == SCENARIO_OPTIONS[6]:  # Cylinder imbalance
+        observed["EGT Cyl 2 (°C)"] += ramp * 85
+    elif scenario_key == SCENARIO_OPTIONS[7]:  # Loss of oil pressure
+        observed["Oil Pressure (bar)"] -= ramp * (bands["Oil Pressure (bar)"]["nominal"] - 1.1)
+        observed["CHT (°C)"] += ramp * 14
+        observed["Vibration (G)"] += ramp * 0.8
+    elif scenario_key == SCENARIO_OPTIONS[8]:  # Manifold pressure departure
+        observed["MAP (inHg)"] -= ramp * 10
+        observed["Engine RPM"] -= ramp * 600
+
+    df = _to_frame(observed)
+    for frame in (df, baseline):
+        frame.attrs.update(reference_bands=stage_reference_bands(flight_stage), flight_stage=flight_stage, anomaly_threshold=ANOMALY_THRESHOLD)
+    return {
+        "df": df,
+        "baseline_df": baseline,
+        "scenario_key": scenario_key,
+        "flight_stage": flight_stage,
+        "seed": int(seed),
+        "noise_level": float(noise_level),
+        "anomaly_onset": ANOMALY_ONSET_SECONDS,
+        **score_telemetry(df, flight_stage),
     }

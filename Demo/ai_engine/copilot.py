@@ -1,229 +1,316 @@
-"""
-Autonomous AI Diagnostic Engine (Gemini 2.5 Flash Wrapper & Expert Fallback Rules)
-"""
+"""Evidence-led reviews of synthetic telemetry, with optional Gemini narration."""
 
-import time
+from datetime import datetime, timezone
+import hashlib
+import inspect
+import json
+
 import numpy as np
 import pandas as pd
 import streamlit as st
+from ai_engine.errors import describe_gemini_error, error_heading
 
-# Safely import Google GenAI SDK if available
 try:
     from google import genai
-    GENAI_SDK_AVAILABLE = True
 except ImportError:
-    GENAI_SDK_AVAILABLE = False
+    genai = None
+
+GENAI_SDK_AVAILABLE = genai is not None
+GEMINI_MODEL = "gemini-3.8-flash"
+API_TIMEOUT_MS = 15_000
+
+# Units and precision belong to the measured channels, not aircraft limits.
+CHANNELS = {
+    "Engine RPM": ("RPM", 0),
+    "EGT Cyl 2 (°C)": ("°C", 1),
+    "EGT Avg (°C)": ("°C", 1),
+    "EGT Spread (°C)": ("°C", 1),
+    "CHT (°C)": ("°C", 1),
+    "MAP (inHg)": ("inHg", 2),
+    "Fuel Pressure (bar)": ("bar", 2),
+    "Oil Pressure (bar)": ("bar", 2),
+    "Vibration (G)": ("G", 2),
+}
 
 
-def generate_ai_diagnosis(scenario_name: str, df_data: pd.DataFrame, health_val: float, rul_val: float, cluster_status_text: str, current_stage: str) -> tuple[str, bool]:
-    """
-    Formulates telemetry diagnostic context and queries Google Gemini 2.5 Flash LLM.
-    Returns (diagnostic_report_markdown, is_live_api_boolean).
-    """
-    avg_egt_cyl2 = float(np.mean(df_data["EGT Cyl 2 (°C)"]))
-    max_egt_cyl2 = float(np.max(df_data["EGT Cyl 2 (°C)"]))
-    avg_map = float(np.mean(df_data["MAP (inHg)"]))
-    avg_fuel_p = float(np.mean(df_data["Fuel Pressure (bar)"]))
-    avg_oil = float(np.mean(df_data["Oil Pressure (bar)"]))
-    avg_cht = float(np.mean(df_data["CHT (°C)"]))
-    avg_rpm = float(np.mean(df_data["Engine RPM"]))
-    avg_vib = float(np.mean(df_data["Vibration (G)"]))
-    
-    prompt = f"""
-You are an expert Rotax 915 iS UAV Master Field Engineer and Maintenance Diagnostician.
-Analyze the following real-time 30-second telemetry snapshot from a MALE UAV equipped with a Rotax 915 iS engine (141 hp turbocharged piston engine).
+def get_gemini_model() -> str:
+    """Use the same session-selected model for tests, reviews and provenance."""
+    return st.session_state.get("gemini_model", GEMINI_MODEL).strip().removeprefix("models/") or GEMINI_MODEL
 
-ENGINE OPERATING CONTEXT:
-- Flight Profile Stage: {current_stage}
-- Active Scenario / Anomaly: {scenario_name}
-- Current Engine Health Index: {health_val:.1f}%
-- Estimated RUL: {rul_val:.0f} hours
-- ML Cluster State: {cluster_status_text}
 
-SENSORS STATISTICAL SUMMARY (30s Window):
-- Engine Speed: Avg {avg_rpm:.0f} RPM (Range: 1800-5800 RPM)
-- EGT Cyl 2: Avg {avg_egt_cyl2:.1f}°C, Peak {max_egt_cyl2:.1f}°C (Limit: 950°C max)
-- EGT Avg (All Cylinders): Avg {np.mean(df_data['EGT Avg (°C)']):.1f}°C
-- Cylinder Head Temp (CHT): Avg {avg_cht:.1f}°C (Limit: 120°C max)
-- Manifold Absolute Pressure (MAP): Avg {avg_map:.2f} inHg (Limit: 30-45 inHg)
-- Fuel Rail Pressure: Avg {avg_fuel_p:.2f} bar (Limit: 2.9-3.2 bar)
-- Oil Pressure: Avg {avg_oil:.2f} bar (Limit: 2.0-5.0 bar above 3500 rpm)
-- Vibration Index: Avg {avg_vib:.2f} G (Limit: 1.5-2.5 G)
+def api_configuration_id(api_key: str) -> str:
+    """Opaque identity for invalidating reports and connection checks after edits."""
+    value = f"{get_gemini_model()}:{GENAI_SDK_AVAILABLE}:{api_key.strip()}"
+    return hashlib.sha256(value.encode()).hexdigest()
 
-INSTRUCTIONS FOR DIAGNOSTIC REPORT:
-Provide a clear, highly professional engineering diagnostic response structured exactly with the following sections:
 
-### 1. 🚨 Identified Anomaly & Root Cause Analysis
-- State clearly whether an anomaly is present or if system is nominal.
-- Detail the specific mechanical/thermal failure mode (e.g. fuel rail pressure regulator, coolant degradation, gearbox pitting, sensor drift, EGT split, oil pump valve).
+def snapshot_fingerprint(scenario_name, df_data, health_val, rul_val,
+                         cluster_status_text, current_stage, api_key="") -> str:
+    """Include every review input and provider configuration in snapshot identity."""
+    digest = hashlib.sha256()
+    metadata = [scenario_name, float(health_val), rul_val, cluster_status_text,
+                current_stage, api_configuration_id(api_key), list(df_data.columns),
+                [str(dtype) for dtype in df_data.dtypes]]
+    digest.update(json.dumps(metadata, default=str, sort_keys=True).encode())
+    digest.update(pd.util.hash_pandas_object(df_data, index=True).values.tobytes())
+    return digest.hexdigest()
 
-### 2. 📋 Rotax 915 iS Manual Reference Checklists
-- Provide step-by-step diagnostic inspection procedures citing Rotax 915 iS Maintenance Manual sections (e.g., Section 73-00-00 Fuel System, Section 75-00-00 Cooling, Section 79-00-00 Lubrication, Section 72-00-00 Mechanical Gearbox).
 
-### 3. ⚡ Recommended Immediate Action for Ground Crew & Flight Controller
-- Specify immediate in-flight or ground actions (e.g., emergency landing protocol, power setting adjustment, sensor calibration check, component replacement).
+def summarize_telemetry(df_data: pd.DataFrame) -> dict:
+    """Measure finite values; a trend is the last valid value minus the first."""
+    data = df_data.copy()
+    cylinders = [f"EGT Cyl {number} (°C)" for number in range(1, 5)]
+    if all(column in data for column in cylinders):
+        cylinder_data = data[cylinders].apply(pd.to_numeric, errors="coerce")
+        data["EGT Spread (°C)"] = (
+            cylinder_data.max(axis=1) - cylinder_data.min(axis=1)
+        ).where(cylinder_data.notna().all(axis=1))
+    summary = {}
+    for column, (unit, precision) in CHANNELS.items():
+        if column not in data:
+            continue
+        values = pd.to_numeric(data[column], errors="coerce")
+        values = values[np.isfinite(values)]
+        if values.empty:
+            continue
+        summary[column] = {
+            "min": float(values.min()), "max": float(values.max()),
+            "mean": float(values.mean()), "first": float(values.iloc[0]),
+            "last": float(values.iloc[-1]),
+            "change": float(values.iloc[-1] - values.iloc[0]),
+            "samples": len(values), "unit": unit, "precision": precision,
+        }
+    return summary
 
-Keep the output concise, technical, and precise.
-"""
 
+def _evidence_markdown(summary: dict) -> str:
+    rows = ["| Channel | Minimum | Mean | Maximum | First → last change |",
+            "| :--- | ---: | ---: | ---: | ---: |"]
+    for column, values in summary.items():
+        precision = values["precision"]
+        rows.append(
+            f"| {column} | {values['min']:.{precision}f} | "
+            f"{values['mean']:.{precision}f} | {values['max']:.{precision}f} | "
+            f"{values['change']:+.{precision}f} |"
+        )
+    return "\n".join(rows)
+
+
+def _local_hypothesis(scenario_name: str, summary: dict) -> str:
+    """Explain the selected simulation, without inferring a physical root cause."""
+    scenarios = {
+        "1.": ("Fuel Pressure (bar)", "fuel pressure instability",
+               "Compare fuel pressure with the EGT channels and the nominal overlay."),
+        "2.": ("CHT (°C)", "a rising thermal signal",
+               "Compare the temperature trend with the same flight stage's nominal overlay."),
+        "3.": ("CHT (°C)", "a falling temperature sensor signal",
+               "Compare temperature against the nominal overlay. This signal alone cannot distinguish sensor drift from real cooling."),
+        "4.": ("Vibration (G)", "an increasing vibration index",
+               "Inspect the index trend. These 1 Hz samples cannot resolve high-frequency gearbox vibration or establish gear wear."),
+        "5.": ("EGT Spread (°C)", "cylinder temperature divergence",
+               "Compare cylinder 2 with all four EGT traces. A temperature split does not establish an injector or ignition fault."),
+        "6.": ("Oil Pressure (bar)", "a falling lubrication pressure signal",
+               "Compare oil pressure with temperature and vibration to inspect the injected cross-channel pattern."),
+        "7.": ("MAP (inHg)", "a falling manifold pressure signal",
+               "Compare MAP with engine RPM to inspect the injected boost-loss pattern."),
+    }
+    selected = next((value for prefix, value in scenarios.items()
+                     if scenario_name.startswith(prefix)), None)
+    if selected is None:
+        if scenario_name != "Nominal Operation (No Anomaly)":
+            return ("No scenario-specific interpretation is configured for this label. "
+                    "Use the measured table and the matching nominal overlay to review the window.")
+        return (
+            "The selected scenario contains no injected fault. The table describes the "
+            "observed window; the dashboard's reference bands determine whether noisy "
+            "samples are flagged. Compare the same flight stage before and after an injection."
+        )
+    channel, description, next_step = selected
+    values = summary.get(channel)
+    observation = ""
+    if values:
+        precision, unit = values["precision"], values["unit"]
+        observation = (
+            f" **{channel}** changes from **{values['first']:.{precision}f}** to "
+            f"**{values['last']:.{precision}f} {unit}**; the measured range is "
+            f"**{values['min']:.{precision}f}–{values['max']:.{precision}f} {unit}**."
+        )
+    return (f"The selected injection models {description}.{observation}\n\n"
+            f"{next_step}")
+
+
+def _window_description(df_data: pd.DataFrame) -> str:
+    description = f"{len(df_data)} samples"
+    if "Time (s)" in df_data:
+        times = pd.to_numeric(df_data["Time (s)"], errors="coerce")
+        times = times[np.isfinite(times)]
+        if not times.empty:
+            description += f" · t = {times.iloc[0]:g}–{times.iloc[-1]:g} s"
+    return description
+
+
+def create_gemini_client(api_key: str):
+    """Use a bounded request timeout when supported by the installed optional SDK."""
+    if not GENAI_SDK_AVAILABLE:
+        raise RuntimeError("Optional Gemini SDK is unavailable")
+    arguments = {"api_key": api_key.strip()}
+    if "http_options" in inspect.signature(genai.Client).parameters:
+        arguments["http_options"] = {"timeout": API_TIMEOUT_MS}
+    return genai.Client(**arguments)
+
+
+def request_gemini_text(api_key: str, prompt: str) -> str:
+    client = create_gemini_client(api_key)
+    try:
+        response = client.models.generate_content(model=get_gemini_model(), contents=prompt)
+        result = getattr(response, "text", None)
+        if not isinstance(result, str) or not result.strip():
+            raise ValueError("Provider returned no text")
+        return result.strip()
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+
+
+def list_gemini_models(api_key: str) -> list[str]:
+    """Discover generation-capable Gemini models only on an explicit UI action."""
+    client = create_gemini_client(api_key)
+    try:
+        names = set()
+        for model in client.models.list():
+            name = (model.name or "").removeprefix("models/")
+            if name.startswith("gemini-") and "generateContent" in (model.supported_actions or []):
+                names.add(name)
+        return sorted(names, key=lambda name: (name != GEMINI_MODEL, name))
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+
+
+def generate_ai_diagnosis(scenario_name: str, df_data: pd.DataFrame,
+                          health_val: float, rul_val: float | None,
+                          cluster_status_text: str, current_stage: str) -> tuple[str, bool]:
+    """Return a measured report and whether Gemini contributed its interpretation."""
+    summary = summarize_telemetry(df_data)
+    if not summary:
+        return "No finite telemetry samples are available for this snapshot.", False
+    evidence = _evidence_markdown(summary)
+    context = (
+        f"**Scenario:** {scenario_name}  \n"
+        f"**Flight stage:** {current_stage}  \n"
+        f"**Window:** {_window_description(df_data)}  \n"
+        f"**Demo fit score:** {health_val:.1f}/100 · {cluster_status_text}"
+    )
+    interpretation = _local_hypothesis(scenario_name, summary)
+    is_live = False
     active_key = st.session_state.get("gemini_api_key", "").strip()
     if active_key and GENAI_SDK_AVAILABLE:
+        prompt = (
+            "You are explaining a synthetic UAV engine telemetry demonstration. "
+            "The scenario is an injected pattern, not independent evidence of a mechanical fault. "
+            "Write at most 180 words with two short sections: 'Pattern interpretation' and "
+            "'What to compare in the demo'. Ground every numerical claim in the measured table. "
+            "Clearly separate observations from hypotheses. Do not invent manufacturer limits, "
+            "manual references, maintenance intervals, remaining useful life, a validated physics "
+            "model, or confirmed component root causes. Do not recommend flight operations, "
+            "maintenance actions, replacements, or certify safety. These 1 Hz samples cannot "
+            "resolve high-frequency vibration. Reference bands and fit scores are demo heuristics. "
+            f"\n\n{context}\n\n{evidence}"
+        )
         try:
-            client = genai.Client(api_key=active_key)
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=prompt,
-            )
-            return response.text, True
-        except Exception as e:
-            st.error(f"AI API Call Exception: {e}. Falling back to embedded expert diagnostic rule engine.")
-    
-    # Offline rule engine fallbacks
-    fallback_responses = {
-        "Nominal Operation (No Anomaly)": f"""### 1. 🚨 Identified Anomaly & Root Cause Analysis
-- **Status**: 🟢 NOMINAL / NO ANOMALY DETECTED.
-- **Flight Profile Stage**: {current_stage}.
-- **Unsupervised ML Cluster**: **Cluster 0 (Nominal Envelope)**.
-- **Root Cause Analysis**: Engine parameters across fuel rail, cooling system, mechanical gearbox, oil circuit, and turbocharger plenum are operating within baseline specifications.
-- **Health Evaluation**: Health Index at 98.0%, expected RUL 140.0 hours.
-
-### 2. 📋 Rotax 915 iS Manual Reference Checklists
-- **Manual Ref**: Rotax 915 iS Maintenance Manual (Section 05-20-00)
-- **Checklist Item 1**: Perform standard 50-hour routine visual inspection of engine compartment.
-- **Checklist Item 2**: Verify ECU log data integrity via BUDS (BRP-Rotax Diagnostic System).
-- **Checklist Item 3**: Inspect spark plug gaps and exhaust spring retention safety wires.
-
-### 3. ⚡ Recommended Immediate Action for Ground Crew & Flight Controller
-- **Flight Controller**: Continue scheduled UAV mission profile without restrictions.
-- **Ground Crew**: Log telemetry parameters in permanent flight records. Next scheduled servicing at interval T+50 hours.""",
-
-        "1. Fuel Pressure Anomaly (2.5 - 3.5 bar instability)": f"""### 1. 🚨 Identified Anomaly & Root Cause Analysis
-- **Status**: 🟡 FUEL SYSTEM ANOMALY DETECTED (FUEL RAIL PRESSURE INSTABILITY).
-- **Observed Data**: Measured fuel rail pressure fluctuating around **{avg_fuel_p:.2f} bar** (Exceeding normal 2.9–3.2 bar range).
-- **Root Cause Analysis**: Fuel rail pressure regulator instability or fine-filter restriction causing transient fuel delivery fluctuations and EGT turbulence.
-
-### 2. 📋 Rotax 915 iS Manual Reference Checklists
-- **Manual Ref**: Rotax 915 iS Maintenance Manual (Section 73-10-00 Injection & Fuel System)
-- **Checklist Item 1**: Check fuel rail pressure regulator valve for debris binding.
-- **Checklist Item 2**: Perform fine-filter inspection and fuel pump flow rate verification.
-- **Checklist Item 3**: Inspect fuel lines for micro-leaks or air bubbles.
-
-### 3. ⚡ Recommended Immediate Action for Ground Crew & Flight Controller
-- **Flight Controller**: Monitor fuel flow stability. Avoid rapid throttle changes. Prepare for return to base.
-- **Ground Crew**: Replace fuel fine-filter element and test fuel pressure regulator valve upon landing.""",
-
-        "2. Cooling Degradation / Thermal Overheating": f"""### 1. 🚨 Identified Anomaly & Root Cause Analysis
-- **Status**: 🟡 THERMAL OVERHEATING ANOMALY (COOLANT & CHT DEGRADATION).
-- **Observed Data**: Cylinder Head Temp (CHT) rising to **{avg_cht:.1f}°C** (Exceeding nominal 110°C ceiling).
-- **Root Cause Analysis**: Reduced radiator cooling airflow or coolant fluid degradation causing thermal buildup under sustained engine load.
-
-### 2. 📋 Rotax 915 iS Manual Reference Checklists
-- **Manual Ref**: Rotax 915 iS Maintenance Manual (Section 75-00-00 Cooling System)
-- **Checklist Item 1**: Inspect radiator air intake duct for obstruction or debris.
-- **Checklist Item 2**: Check expansion tank coolant fluid level and cap pressure seal.
-- **Checklist Item 3**: Inspect coolant pump belt drive tension.
-
-### 3. ⚡ Recommended Immediate Action for Ground Crew & Flight Controller
-- **Flight Controller**: Reduce engine power to ECO cruise setting (80% RPM) to lower thermal load.
-- **Ground Crew**: Flush coolant radiator fins and check coolant pump seal upon touchdown.""",
-
-        "3. Coolant Sensor Drift / False-Low Reading": f"""### 1. 🚨 Identified Anomaly & Root Cause Analysis
-- **Status**: 🟡 PLAUSIBILITY ANOMALY (COOLANT SENSOR FALSE-LOW DRIFT).
-- **Observed Data**: Measured CHT sensor dropped to **{avg_cht:.1f}°C** while physics twin predicts high thermal state.
-- **Root Cause Analysis**: Coolant level loss or sensor un-immersion causing sensor to measure ambient air temp instead of fluid temp (Rotax Installation Manual Section 75).
-
-### 2. 📋 Rotax 915 iS Manual Reference Checklists
-- **Manual Ref**: Rotax 915 iS Installation & Maintenance Manual (Section 75-20-00 Temperature Sensing)
-- **Checklist Item 1**: Check coolant expansion tank for fluid loss.
-- **Checklist Item 2**: Inspect temperature sensor probe immersion depth and wiring harness.
-
-### 3. ⚡ Recommended Immediate Action for Ground Crew & Flight Controller
-- **Flight Controller**: Trust physics digital twin thermal model over raw sensor signal. Initiate return to base.
-- **Ground Crew**: Inspect cooling system for fluid leaks and recalibrate temperature sensor probe.""",
-
-        "4. Gearbox High-Frequency Vibration Anomaly": f"""### 1. 🚨 Identified Anomaly & Root Cause Analysis
-- **Status**: 🟡 MECHANICAL DEGRADATION (GEARBOX VIBRATION ANOMALY).
-- **Observed Data**: Vibration Index reached **{avg_vib:.2f} G** (Exceeding 2.5 G ceiling).
-- **Root Cause Analysis**: Mechanical gearbox gear-pitting or propeller shaft imbalance producing high-frequency vibration energy.
-
-### 2. 📋 Rotax 915 iS Manual Reference Checklists
-- **Manual Ref**: Rotax 915 iS Heavy Maintenance Manual (Section 72-10-00 Gearbox & Propeller Drive)
-- **Checklist Item 1**: Perform magnetic drain plug inspection for iron/steel chips.
-- **Checklist Item 2**: Check overload clutch friction torque and gearbox gear backlash.
-
-### 3. ⚡ Recommended Immediate Action for Ground Crew & Flight Controller
-- **Flight Controller**: Smooth out engine throttle commands to reduce torsional vibration spikes.
-- **Ground Crew**: Inspect magnetic plug for metallic wear debris and perform gearbox backlash measurement.""",
-
-        "5. EGT Cylinder 2 Combustion Imbalance": f"""### 1. 🚨 Identified Anomaly & Root Cause Analysis
-- **Status**: 🟡 COMBUSTION ANOMALY (EGT CYLINDER 2 SPIKE).
-- **Observed Data**: Cylinder 2 EGT peak reached **{max_egt_cyl2:.1f}°C** (EGT split exceeds 200°C limit).
-- **Root Cause Analysis**: Partially clogged fuel injector or intake runner leak causing localized lean air-fuel burn in Cylinder 2.
-
-### 2. 📋 Rotax 915 iS Manual Reference Checklists
-- **Manual Ref**: Rotax 915 iS Maintenance Manual (Section 73-10-00 Injection System)
-- **Checklist Item 1**: Check Cylinder 2 fuel injector wiring harness & resistance.
-- **Checklist Item 2**: Perform injector flow-rate nozzle test for carbon deposit blockage.
-
-### 3. ⚡ Recommended Immediate Action for Ground Crew & Flight Controller
-- **Flight Controller**: Reduce power setting to lower EGT below 800°C. Initiate RTB.
-- **Ground Crew**: Replace Cylinder 2 fuel injector nozzle upon landing.""",
-
-        "6. Oil Pressure Loss / Lubrication Degradation": f"""### 1. 🚨 Identified Anomaly & Root Cause Analysis
-- **Status**: 🔴 CRITICAL HYDRAULIC FAILURE (OIL PRESSURE LOSS).
-- **Observed Data**: Lubrication pressure dropped to **{avg_oil:.2f} bar** (Safety limit is 2.0 bar).
-- **Root Cause Analysis**: Severe oil pressure drop due to oil pump relief valve binding or oil cooler line rupture.
-
-### 2. 📋 Rotax 915 iS Manual Reference Checklists
-- **Manual Ref**: Rotax 915 iS Maintenance Manual (Section 79-00-00 Lubrication System)
-- **Checklist Item 1**: Check oil tank fluid level and lower cowling for leaks.
-- **Checklist Item 2**: Inspect oil filter pleats for metallic wear particles.
-
-### 3. ⚡ Recommended Immediate Action for Ground Crew & Flight Controller
-- **Flight Controller**: **EMERGENCY LANDING INITIATION**. Reduce engine power to minimum glide setting.
-- **Ground Crew**: Tow aircraft off runway immediately and perform full engine inspection.""",
-
-        "7. Turbocharger Boost Air-Path Collapse": f"""### 1. 🚨 Identified Anomaly & Root Cause Analysis
-- **Status**: 🔴 CRITICAL BOOST FAILURE (TURBOCHARGER MAP COLLAPSE).
-- **Observed Data**: Manifold Pressure (MAP) collapsed to **{avg_map:.2f} inHg** (Boost limit 35-45 inHg).
-- **Root Cause Analysis**: Wastegate actuator stuck open or intercooler charge pipe dislodgement.
-
-### 2. 📋 Rotax 915 iS Manual Reference Checklists
-- **Manual Ref**: Rotax 915 iS Maintenance Manual (Section 78-10-00 Turbocharger System)
-- **Checklist Item 1**: Check wastegate mechanical linkage and pneumatic solenoid valve.
-- **Checklist Item 2**: Inspect intercooler charge pipes and silicone couplers.
-
-### 3. ⚡ Recommended Immediate Action for Ground Crew & Flight Controller
-- **Flight Controller**: Expect power loss. Descend UAV to lower altitude for stable unboosted flight.
-- **Ground Crew**: Inspect wastegate linkage and charge pipes before next flight."""
-    }
-
-    return fallback_responses.get(scenario_name, fallback_responses["Nominal Operation (No Anomaly)"]), False
+            interpretation = request_gemini_text(active_key, prompt)
+            is_live = True
+        except Exception as error:
+            st.session_state["gemini_connection_status"] = {
+                "configuration": api_configuration_id(active_key), "ok": False,
+                "checked_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+                "error": describe_gemini_error(error),
+            }
+    source = f"Gemini · {get_gemini_model()}" if is_live else "Local evidence summary"
+    report = (
+        f"# Telemetry review\n\n{context}\n\n"
+        f"**Analysis source:** {source}  \n"
+        "**Data source:** Synthetic simulation\n\n"
+        f"## Measured evidence\n\n{evidence}\n\n"
+        "Changes compare the first and last finite samples; units are shown in channel names. "
+        "EGT spread is the simultaneous maximum minus minimum across all four cylinders.\n\n"
+        f"## {'Gemini interpretation' if is_live else 'Demo interpretation'}\n\n{interpretation}\n\n"
+        "_This review describes a synthetic scenario. The fit score and reference bands are "
+        "illustrative; component condition and remaining useful life are not established._"
+    )
+    return report, is_live
 
 
-def render_ai_diagnostic_section(selected_scenario: str, df: pd.DataFrame, health: float, rul: float, cluster_text: str, flight_stage: str):
-    """Renders the AI Diagnostic Copilot card and button."""
+def render_ai_diagnostic_section(selected_scenario: str, df: pd.DataFrame,
+                                 health: float, rul: float | None,
+                                 cluster_text: str, flight_stage: str):
+    """Keep a report visible only while its data and API configuration still match."""
     st.markdown("""
         <div class="ai-copilot-card">
-            <h3 style="color: #58a6ff; margin-top: 0; font-size: 1.3rem;">
-                🧠 Autonomous AI Diagnostic Engine (Rotax 915 Field Specialist)
-            </h3>
-            <p style="color: #8b949e; font-size: 0.88rem;">
-                Execute deep AI diagnostic reasoning on current telemetry streams to isolate component failure modes, reference Rotax 915 iS maintenance manuals, and output ground crew action plans.
-            </p>
+            <div style="color:#40d9e6;font-size:.72rem;letter-spacing:.12em;font-weight:700;">AI DIAGNOSTICS</div>
+            <h3 style="color:#e8f0f8;margin:8px 0;">Turn telemetry into a clear review</h3>
+            <p style="color:#91a4ba;margin:0;">Inspect measured ranges and trends, explain the injected pattern, and export the evidence.</p>
         </div>
     """, unsafe_allow_html=True)
+    active_key = st.session_state.get("gemini_api_key", "").strip()
+    fingerprint = snapshot_fingerprint(
+        selected_scenario, df, health, rul, cluster_text, flight_stage, active_key
+    )
+    if active_key and GENAI_SDK_AVAILABLE:
+        st.caption("Gemini configured · Running a review sends this synthetic telemetry summary to Google.")
+    elif active_key:
+        st.caption("Key configured · Gemini SDK unavailable; local analysis is ready.")
+    else:
+        st.caption("Local analysis ready · Add a Gemini key in Settings for optional AI interpretation.")
 
-    st.markdown("<br>", unsafe_allow_html=True)
-    run_analysis = st.button("🧠 Perform AI Diagnostic Analysis", type="primary", use_container_width=True)
+    if st.button("Generate telemetry review", type="primary", width="stretch",
+                 key="run_diagnostic_review"):
+        was_playing = st.session_state.get("mission_playing", False)
+        st.session_state["mission_playing"] = False
+        with st.spinner("Reviewing this telemetry snapshot…"):
+            report, is_live = generate_ai_diagnosis(
+                selected_scenario, df, health, rul, cluster_text, flight_stage
+            )
+        created_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        report += f"\n\n---\nGenerated {created_at} · Snapshot `{fingerprint[:8]}`\n"
+        st.session_state["diagnostic_report"] = {
+            "fingerprint": fingerprint, "markdown": report, "is_live": is_live,
+            "created_at": created_at,
+            "api_failed": bool(active_key and GENAI_SDK_AVAILABLE and not is_live),
+            "error": st.session_state.get("gemini_connection_status", {}).get("error") if not is_live else None,
+        }
+        if is_live:
+            st.session_state["gemini_connection_status"] = {
+                "configuration": api_configuration_id(active_key), "ok": True,
+                "checked_at": st.session_state["diagnostic_report"]["created_at"],
+            }
+        if was_playing:
+            st.rerun()
 
-    if run_analysis:
-        with st.spinner("⏳ Running Autonomous AI Diagnostic Engine..."):
-            time.sleep(0.8)
-            diag_output, is_live = generate_ai_diagnosis(selected_scenario, df, health, rul, cluster_text, flight_stage)
-            st.markdown("---")
-            if is_live:
-                st.success("✨ **Autonomous AI Diagnostic Analysis Complete**")
-            else:
-                st.info("ℹ️ **AI Field Advisory Generated** (To enable online LLM reasoning, configure your key in **⚙️ API Settings**).")
-            st.markdown(diag_output)
+    saved_report = st.session_state.get("diagnostic_report")
+    if not saved_report:
+        return
+    if saved_report["fingerprint"] != fingerprint:
+        st.info("The snapshot or API settings changed. Generate a new review for the current data.")
+        return
+    if saved_report["api_failed"]:
+        st.warning("Gemini did not return a review. Your local evidence summary is ready; check the saved key and connection in Settings.")
+        if saved_report.get("error"):
+            st.error(error_heading(saved_report["error"]))
+            st.caption(saved_report["error"]["action"])
+    source = "Gemini interpretation" if saved_report["is_live"] else "Local evidence summary"
+    st.caption(f"{source} · {saved_report['created_at']} · Snapshot {fingerprint[:8]}")
+    st.markdown(saved_report["markdown"])
+    st.download_button(
+        "Download review · Markdown", data=saved_report["markdown"],
+        file_name=f"telemetry-review-{fingerprint[:8]}.md", mime="text/markdown",
+        key="download_diagnostic_review", width="stretch",
+    )

@@ -1,81 +1,202 @@
-"""
-Telemetry Stream Plotly Line Charts Component
-"""
+"""Compact telemetry charts for the synthetic engine demonstration."""
 
 import pandas as pd
-import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import streamlit as st
 
-def render_telemetry_charts(df: pd.DataFrame, selected_scenario: str):
-    """Renders 4 separate Plotly line chart cards in a 2x2 grid with zero text/legend overlapping."""
-    st.markdown("### 📊 Real-Time Rotax 915 iS Telemetry Stream (30s Window)")
+CHART_COLORS = {
+    "panel": "#101d2e",
+    "plot": "#0c1624",
+    "grid": "#23364b",
+    "text": "#e8f0f8",
+    "muted": "#91a4ba",
+    "cyan": "#40d9e6",
+    "green": "#5ce0ae",
+    "amber": "#f7bb60",
+    "red": "#ff6b7a",
+    "purple": "#a999ff",
+}
 
-    c1, c2 = st.columns(2)
+PLOT_CONFIG = {
+    "displayModeBar": False,
+    "responsive": True,
+    "scrollZoom": False,
+}
 
-    chart_theme = dict(
-        paper_bgcolor='#161b22', plot_bgcolor='#0d1117',
-        font=dict(color='#c9d1d9', family='sans-serif', size=11),
-        margin=dict(l=50, r=50, t=50, b=60),
-        xaxis=dict(title="Time (s)", gridcolor='#21262d'),
-        legend=dict(orientation="h", yanchor="top", y=-0.22, xanchor="center", x=0.5)
+
+def apply_chart_layout(fig: go.Figure, height: int = 330) -> go.Figure:
+    """Keep chart text and legends readable within narrow dashboard columns."""
+    fig.update_layout(
+        paper_bgcolor=CHART_COLORS["panel"],
+        plot_bgcolor=CHART_COLORS["plot"],
+        font=dict(color=CHART_COLORS["text"], family="sans-serif", size=11),
+        margin=dict(l=48, r=46, t=16, b=105),
+        height=height,
+        hovermode="x unified",
+        hoverlabel=dict(
+            bgcolor=CHART_COLORS["panel"],
+            bordercolor=CHART_COLORS["grid"],
+            font_color=CHART_COLORS["text"],
+        ),
+        legend=dict(
+            orientation="h",
+            yanchor="top",
+            y=-0.22,
+            xanchor="left",
+            x=0,
+            font=dict(size=10),
+            tracegroupgap=0,
+        ),
+    )
+    fig.update_xaxes(
+        title_text="Elapsed time (s)",
+        title_font_size=11,
+        gridcolor=CHART_COLORS["grid"],
+        zeroline=False,
+        automargin=True,
+        tickfont_color=CHART_COLORS["muted"],
+    )
+    fig.update_yaxes(
+        title_font_size=11,
+        gridcolor=CHART_COLORS["grid"],
+        zeroline=False,
+        automargin=True,
+        tickfont_color=CHART_COLORS["muted"],
+    )
+    return fig
+
+
+def _trace(df, column, name, color, unit, nominal=False):
+    return go.Scatter(
+        x=df["Time (s)"],
+        y=df[column],
+        name=name,
+        mode="lines",
+        line=dict(color=color, width=1.4 if nominal else 2.3, dash="dot" if nominal else "solid"),
+        opacity=0.55 if nominal else 1,
+        hovertemplate=f"%{{y:,.2f}} {unit}<extra>{name}</extra>",
     )
 
-    with c1:
-        # Chart 1: EGT by Cylinder
-        fig1 = go.Figure()
-        fig1.add_trace(go.Scatter(x=df["Time (s)"], y=df["EGT Cyl 1 (°C)"], name="EGT Cyl 1", line=dict(color="#58a6ff", width=2)))
-        fig1.add_trace(go.Scatter(x=df["Time (s)"], y=df["EGT Cyl 2 (°C)"], name="EGT Cyl 2", line=dict(color="#f85149" if "Cylinder 2" in selected_scenario else "#a371f7", width=2.5)))
-        fig1.add_trace(go.Scatter(x=df["Time (s)"], y=df["EGT Cyl 3 (°C)"], name="EGT Cyl 3", line=dict(color="#3fb950", width=2)))
-        fig1.add_trace(go.Scatter(x=df["Time (s)"], y=df["EGT Cyl 4 (°C)"], name="EGT Cyl 4", line=dict(color="#d29922", width=2)))
-        fig1.add_hline(y=950, line_dash="dash", line_color="#f85149", annotation_text="EGT Limit (950°C)")
-        
-        layout1 = chart_theme.copy()
-        layout1.update(title=dict(text="Exhaust Gas Temp (EGT) by Cylinder (°C)", font=dict(size=14, color='#f0f6fc')), yaxis=dict(title="Temperature (°C)", gridcolor='#21262d'), height=340)
-        fig1.update_layout(**layout1)
-        st.plotly_chart(fig1, use_container_width=True)
 
-    with c2:
-        # Chart 2: MAP & RPM
-        fig2 = make_subplots(specs=[[{"secondary_y": True}]])
-        fig2.add_trace(go.Scatter(x=df["Time (s)"], y=df["MAP (inHg)"], name="MAP (inHg)", line=dict(color="#f472b6", width=2.5)), secondary_y=False)
-        fig2.add_trace(go.Scatter(x=df["Time (s)"], y=df["Engine RPM"], name="Engine Speed (RPM)", line=dict(color="#a371f7", width=2, dash="dot")), secondary_y=True)
-        fig2.add_hline(y=30, line_dash="dash", line_color="#8b949e", annotation_text="MAP Min (30 inHg)", secondary_y=False)
-        
-        layout2 = chart_theme.copy()
-        layout2.update(title=dict(text="Manifold Absolute Pressure (MAP) & Engine RPM", font=dict(size=14, color='#f0f6fc')), height=340)
-        fig2.update_layout(**layout2)
-        fig2.update_yaxes(title_text="MAP (inHg)", gridcolor='#21262d', secondary_y=False)
-        fig2.update_yaxes(title_text="Engine Speed (RPM)", gridcolor='#21262d', secondary_y=True)
-        st.plotly_chart(fig2, use_container_width=True)
+def _reference(fig, value, secondary_y=None):
+    kwargs = {"secondary_y": secondary_y} if secondary_y is not None else {}
+    fig.add_hline(
+        y=value,
+        line_dash="dash",
+        line_width=1,
+        line_color=CHART_COLORS["amber"],
+        opacity=0.55,
+        **kwargs,
+    )
 
-    c3, c4 = st.columns(2)
 
-    with c3:
-        # Chart 3: CHT & Fuel Rail Pressure
-        fig3 = make_subplots(specs=[[{"secondary_y": True}]])
-        fig3.add_trace(go.Scatter(x=df["Time (s)"], y=df["CHT (°C)"], name="CHT (°C)", line=dict(color="#d29922", width=2.5)), secondary_y=False)
-        fig3.add_trace(go.Scatter(x=df["Time (s)"], y=df["Fuel Pressure (bar)"], name="Fuel Rail Press (bar)", line=dict(color="#38bdf8" if "Fuel Pressure" not in selected_scenario else "#f85149", width=2.5)), secondary_y=True)
-        fig3.add_hline(y=120.0, line_dash="dash", line_color="#f85149", annotation_text="CHT Limit (120°C)", secondary_y=False)
-        
-        layout3 = chart_theme.copy()
-        layout3.update(title=dict(text="Cylinder Head Temp (CHT) & Fuel Rail Pressure", font=dict(size=14, color='#f0f6fc')), height=340)
-        fig3.update_layout(**layout3)
-        fig3.update_yaxes(title_text="CHT (°C)", gridcolor='#21262d', secondary_y=False)
-        fig3.update_yaxes(title_text="Fuel Rail Press (bar)", gridcolor='#21262d', secondary_y=True)
-        st.plotly_chart(fig3, use_container_width=True)
+def _band(df, column, fallback):
+    reference = df.attrs.get("reference_bands", {}).get(column)
+    return (reference["min"], reference["max"]) if reference else fallback
 
-    with c4:
-        # Chart 4: Oil Pressure & Vibration Index
-        fig4 = make_subplots(specs=[[{"secondary_y": True}]])
-        fig4.add_trace(go.Scatter(x=df["Time (s)"], y=df["Oil Pressure (bar)"], name="Oil Press (bar)", line=dict(color="#3fb950" if "Oil Pressure" not in selected_scenario else "#f85149", width=2.5)), secondary_y=False)
-        fig4.add_trace(go.Scatter(x=df["Time (s)"], y=df["Vibration (G)"], name="Vibration (G)", line=dict(color="#a855f7" if "Gearbox" not in selected_scenario else "#f85149", width=2.5)), secondary_y=True)
-        fig4.add_hline(y=2.0, line_dash="dash", line_color="#f85149", annotation_text="Oil Min (2.0 bar)", secondary_y=False)
-        fig4.add_hline(y=2.5, line_dash="dash", line_color="#d29922", annotation_text="Vib Ceiling (2.5 G)", secondary_y=True)
-        
-        layout4 = chart_theme.copy()
-        layout4.update(title=dict(text="Lubrication Oil Pressure & Gearbox Vibration", font=dict(size=14, color='#f0f6fc')), height=340)
-        fig4.update_layout(**layout4)
-        fig4.update_yaxes(title_text="Oil Pressure (bar)", gridcolor='#21262d', secondary_y=False)
-        fig4.update_yaxes(title_text="Vibration Index (G)", gridcolor='#21262d', secondary_y=True)
-        st.plotly_chart(fig4, use_container_width=True)
+
+def _band_label(bounds):
+    return f"{bounds[0]:g}–{bounds[1]:g}"
+
+
+def _paired_chart(df, baseline_df, specs, references):
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    for secondary, (column, name, color, unit, axis_title) in enumerate(specs):
+        if baseline_df is not None and column in baseline_df:
+            fig.add_trace(
+                _trace(baseline_df, column, f"Nominal {name}", color, unit, nominal=True),
+                secondary_y=bool(secondary),
+            )
+        fig.add_trace(_trace(df, column, name, color, unit), secondary_y=bool(secondary))
+        fig.update_yaxes(title_text=axis_title, secondary_y=bool(secondary))
+    for value, secondary in references:
+        _reference(fig, value, secondary_y=secondary)
+    apply_chart_layout(fig)
+    fig.update_yaxes(showgrid=False, secondary_y=True)
+    return fig
+
+
+def render_telemetry_charts(
+    df: pd.DataFrame,
+    selected_scenario: str,
+    baseline_df: pd.DataFrame | None = None,
+    show_baseline: bool = True,
+):
+    """Plot the selected synthetic window with optional paired nominal traces."""
+    if df.empty:
+        st.info("No telemetry samples are available for this window.")
+        return
+    baseline = baseline_df if show_baseline else None
+    reference_label = "stage demo" if df.attrs.get("reference_bands") else "demo"
+    st.caption(
+        "Solid lines show simulated sensor values; dotted lines show the stage nominal reference. "
+        "Amber dashed lines mark illustrative reference bounds. Hover to inspect a sample."
+        if baseline is not None
+        else "Solid lines show simulated sensor values. Amber dashed lines mark illustrative reference bounds. "
+        "Hover to inspect a sample."
+    )
+    first, second = st.columns(2, gap="medium")
+    with first:
+        st.markdown("**Exhaust temperatures**")
+        cylinder_bands = [_band(df, f"EGT Cyl {i} (°C)", (750, 950)) for i in range(1, 5)]
+        egt_band = (min(band[0] for band in cylinder_bands), max(band[1] for band in cylinder_bands))
+        st.caption(f"Four cylinders · {reference_label} envelope {_band_label(egt_band)} °C")
+        fig = go.Figure()
+        if baseline is not None and "EGT Avg (°C)" in baseline:
+            fig.add_trace(
+                _trace(baseline, "EGT Avg (°C)", "Nominal avg", CHART_COLORS["muted"], "°C", nominal=True)
+            )
+        for cylinder, color in enumerate(("cyan", "purple", "green", "amber"), start=1):
+            fig.add_trace(
+                _trace(df, f"EGT Cyl {cylinder} (°C)", f"Cyl {cylinder}", CHART_COLORS[color], "°C")
+            )
+        for boundary in egt_band:
+            _reference(fig, boundary)
+        apply_chart_layout(fig)
+        fig.update_yaxes(title_text="Temperature (°C)")
+        st.plotly_chart(fig, width="stretch", config=PLOT_CONFIG, key="telemetry_egt")
+    with second:
+        st.markdown("**Power & boost**")
+        map_band = _band(df, "MAP (inHg)", (30, 45))
+        rpm_band = _band(df, "Engine RPM", (1800, 5800))
+        st.caption(f"{reference_label.capitalize()} · MAP {_band_label(map_band)} inHg · {_band_label(rpm_band)} RPM")
+        fig = _paired_chart(
+            df, baseline,
+            [
+                ("MAP (inHg)", "MAP", CHART_COLORS["cyan"], "inHg", "MAP (inHg)"),
+                ("Engine RPM", "RPM", CHART_COLORS["purple"], "RPM", "Engine speed (RPM)"),
+            ],
+            [(value, False) for value in map_band] + [(value, True) for value in rpm_band],
+        )
+        st.plotly_chart(fig, width="stretch", config=PLOT_CONFIG, key="telemetry_power")
+
+    third, fourth = st.columns(2, gap="medium")
+    with third:
+        st.markdown("**Cooling & fuel delivery**")
+        cht_band = _band(df, "CHT (°C)", (100, 120))
+        fuel_band = _band(df, "Fuel Pressure (bar)", (2.9, 3.2))
+        st.caption(f"{reference_label.capitalize()} · CHT {_band_label(cht_band)} °C · fuel {_band_label(fuel_band)} bar")
+        fig = _paired_chart(
+            df, baseline,
+            [
+                ("CHT (°C)", "CHT", CHART_COLORS["amber"], "°C", "CHT (°C)"),
+                ("Fuel Pressure (bar)", "Fuel", CHART_COLORS["cyan"], "bar", "Fuel pressure (bar)"),
+            ],
+            [(value, False) for value in cht_band] + [(value, True) for value in fuel_band],
+        )
+        st.plotly_chart(fig, width="stretch", config=PLOT_CONFIG, key="telemetry_cooling")
+    with fourth:
+        st.markdown("**Lubrication & vibration**")
+        oil_band = _band(df, "Oil Pressure (bar)", (2.0, 5.0))
+        vibration_band = _band(df, "Vibration (G)", (1.5, 2.5))
+        st.caption(f"{reference_label.capitalize()} · oil {_band_label(oil_band)} bar · vibration {_band_label(vibration_band)} G")
+        fig = _paired_chart(
+            df, baseline,
+            [
+                ("Oil Pressure (bar)", "Oil", CHART_COLORS["green"], "bar", "Oil pressure (bar)"),
+                ("Vibration (G)", "Vibration", CHART_COLORS["purple"], "G", "Vibration (G)"),
+            ],
+            [(value, False) for value in oil_band] + [(value, True) for value in vibration_band],
+        )
+        st.plotly_chart(fig, width="stretch", config=PLOT_CONFIG, key="telemetry_mechanical")
