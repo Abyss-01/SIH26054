@@ -11,6 +11,9 @@ import numpy as np
 import pandas as pd
 import os
 import json
+import hashlib
+from pathlib import Path
+import simulation.engine_simulator as simulator_module
 from datetime import datetime, timezone
 
 from simulation.engine_simulator import (
@@ -23,11 +26,10 @@ from simulation.engine_simulator import (
 # Output paths
 # ============================================================================
 
-OUTPUT_DIR = os.path.join(os.path.dirname(__file__), '..', 'data')
+OUTPUT_DIR = os.path.join(os.path.dirname(__file__), 'data')
 CSV_PATH = os.path.join(OUTPUT_DIR, 'dataset.csv')
 META_PATH = os.path.join(OUTPUT_DIR, 'dataset_meta.json')
 
-os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # ============================================================================
 # Mission profile builder
@@ -75,7 +77,7 @@ def build_mission_profile():
             'target_rpm': 5500,              # continuous power RPM (SOURCE: OM 2.1, p. 2-2)
             'target_throttle': 0.95,
             'target_altitude': 12000,
-            'ambient_temp': 25.0 - 0.0065 * 12000 * 0.3048,  # lapse rate (ASSUMPTION)
+            'ambient_temp': 25.0,  # lapse rate (ASSUMPTION)
             'description': 'Climb to cruise altitude — continuous power 99 kW@5500 (SOURCE)',
         },
         {
@@ -84,16 +86,16 @@ def build_mission_profile():
             'target_rpm': 4800,              # (ASSUMPTION — ECO mode typical cruise)
             'target_throttle': 0.70,
             'target_altitude': 12000,
-            'ambient_temp': 25.0 - 0.0065 * 12000 * 0.3048,
+            'ambient_temp': 25.0,
             'description': 'Cruise / patrol — ECO mode (ASSUMPTION)',
         },
         {
             'phase': MissionPhase.HIGH_LOAD.value,
             'duration': 120,                 # 2 min high power (combat / emergency)
             'target_rpm': 5500,
-            'target_throttle': 0.97,
+            'target_throttle': 0.98,
             'target_altitude': 12000,
-            'ambient_temp': 25.0 - 0.0065 * 12000 * 0.3048,
+            'ambient_temp': 25.0,
             'description': 'High load — near max continuous, POWER mode (ASSUMPTION)',
         },
         {
@@ -102,7 +104,7 @@ def build_mission_profile():
             'target_rpm': 4800,
             'target_throttle': 0.65,
             'target_altitude': 12000,
-            'ambient_temp': 25.0 - 0.0065 * 12000 * 0.3048,
+            'ambient_temp': 25.0,
             'description': 'Resume cruise — ECO mode (ASSUMPTION)',
         },
         {
@@ -111,7 +113,7 @@ def build_mission_profile():
             'target_rpm': 5500,
             'target_throttle': 0.90,
             'target_altitude': 15000,        # critical altitude (SOURCE: OM 2.1, p. 2-2)
-            'ambient_temp': 25.0 - 0.0065 * 15000 * 0.3048,
+            'ambient_temp': 25.0,
             'description': 'Climb to loiter altitude — near critical altitude (SOURCE)',
         },
         {
@@ -120,7 +122,7 @@ def build_mission_profile():
             'target_rpm': 4500,
             'target_throttle': 0.60,
             'target_altitude': 15000,
-            'ambient_temp': 25.0 - 0.0065 * 15000 * 0.3048,
+            'ambient_temp': 25.0,
             'description': 'Loiter at critical altitude — ECO mode (SOURCE+ASSUMPTION)',
         },
         {
@@ -129,7 +131,7 @@ def build_mission_profile():
             'target_rpm': 4000,
             'target_throttle': 0.40,
             'target_altitude': 5000,
-            'ambient_temp': 25.0 - 0.0065 * 5000 * 0.3048,
+            'ambient_temp': 25.0,
             'description': 'Descent — power reduction (ASSUMPTION)',
         },
         {
@@ -149,7 +151,7 @@ def build_mission_profile():
 # ============================================================================
 
 # Each scenario: (name, description, [(fault_def), ...])
-# fault_def = (fault_type, severity, onset_time, duration)
+# fault_def = (fault_type, normalized severity, onset_time, duration[, EGT sensor_id])
 
 SCENARIOS = [
     # ------------------------------------------------------------------
@@ -182,9 +184,8 @@ SCENARIOS = [
     ),
     (
         'fuel_filter_clog',
-        'Fuel filter gradually clogs. Per SOURCE (IM 73-00-00, p. 12): increased '
-        'pressure beyond limit indicates contaminated fine filter. Fuel pressure '
-        'rises, eventually affecting fuel delivery.',
+        'Fuel filter restriction lowers downstream fuel rail pressure (ASSUMPTION). '
+        'The manual rising-pressure diagnostic refers to a sensor upstream of the filter.',
         [
             ('fuel_filter_clog', 0.7, 2400, float('inf')),
         ],
@@ -193,7 +194,7 @@ SCENARIOS = [
         'injector_degradation',
         'One or more fuel injectors degrade / partially block. ASSUMPTION — exact '
         'signatures not yet source-characterized. Reduces combustion efficiency → '
-        'lower EGT, higher fuel consumption, roughness.',
+        'lower EGT. Fuel and power outputs remain healthy reference estimates.',
         [
             ('injector_degradation', 0.5, 3000, float('inf')),
         ],
@@ -217,22 +218,22 @@ SCENARIOS = [
         'error. ASSUMPTION: bias magnitude. Tests whether ML can detect sensor faults '
         'vs. real engine faults.',
         [
-            ('egt_sensor_fault', 1.0, 1200, float('inf')),  # severity encodes sensor id=1
+            ('egt_sensor_fault', 1.0, 1200, float('inf'), 1),
         ],
     ),
     (
         'egt_sensor_3_bias',
         'EGT sensor 3 bias — tests per-cylinder fault detection vs. aggregate.',
         [
-            ('egt_sensor_fault', 3.0, 800, float('inf')),
+            ('egt_sensor_fault', 1.0, 800, float('inf'), 3),
         ],
     ),
     (
-        'egt_sensor_split_fault',
-        'EGT sensor 2 and 4 both biased in opposite directions — inflates EGT_split, '
-        'which has SOURCE-backed diagnostic value (OM 2.1, p. 2-6).',
+        'egt_sensor_2_bias',
+        'EGT sensor 2 develops a positive bias, increasing per-cylinder EGT disagreement '
+        'and therefore EGT_split.',
         [
-            ('egt_sensor_fault', 2.0, 1500, float('inf')),
+            ('egt_sensor_fault', 1.0, 1500, float('inf'), 2),
         ],
     ),
     (
@@ -272,146 +273,156 @@ SCENARIOS = [
 # Run all scenarios and build dataset
 # ============================================================================
 
-def run_all_scenarios(
-    dt: float = 1.0,
-    duration_hours: float = 3.5,  # enough for all scenarios including late onsets
-):
-    """
-    Run all fault scenarios and produce a combined dataset.
+# Inputs available to a consumer; labels and scenario identity must never enter X.
+# Health is an observable-derived indicator, omitted to avoid circular health targets.
+FEATURE_COLUMNS = [
+    'rpm', 'throttle_position', 'ambient_pressure_hpa', 'ambient_temperature_c',
+    'altitude_ft', 'airflow_kg_s', 'manifold_pressure_mbar', 'manifold_temperature_c',
+    'boost_pressure_mbar', 'oil_pressure_bar', 'oil_temperature_c',
+    'coolant_temperature_c', 'egt_1_c', 'egt_2_c', 'egt_3_c', 'egt_4_c',
+    'egt_split_c', 'fuel_pressure_bar', 'operating_mode', 'expected_power_kw',
+    'expected_fuel_flow_l_h', 'vibration_rms_g',
+]
+LABEL_COLUMNS = ['fault_active', 'fault_type', 'fault_severity', 'active_faults', 'fault_severities']
 
-    Args:
-        dt:             Time step in seconds (1.0 = 1 Hz)
-        duration_hours: Total simulation time per scenario
 
-    Returns:
-        DataFrame with all telemetry rows, plus metadata dict.
+def prepare_mission(duration, rng, vary=True):
+    """Extend existing cruise segments to fill the requested duration.
+    Small run-to-run operating variations are engineering assumptions.
     """
-    duration = int(duration_hours * 3600)
     mission = build_mission_profile()
+    minimum = sum(p['duration'] for p in mission)
+    if duration < minimum:
+        raise ValueError(f"duration must be at least {minimum} seconds to complete the mission")
+    cruise = [p for p in mission if p['phase'] == 'cruise']
+    cruise_duration = sum(p['duration'] for p in cruise)
+    for p in cruise:
+        p['duration'] += (duration - minimum) * p['duration'] / cruise_duration
+        if vary:
+            p['target_rpm'] += float(rng.uniform(-100, 100))
+            p['target_throttle'] += float(rng.uniform(-0.02, 0.02))
+    sea_level_temp = float(rng.uniform(20.0, 30.0)) if vary else 25.0
+    for p in mission:
+        p['ambient_temp'] = sea_level_temp
+    return mission
+
+
+def validate_run(df, events, duration):
+    """Reject malformed telemetry or labels before exporting a run."""
+    if df.empty or df.isna().any().any():
+        raise ValueError("empty run or missing values")
+    if not np.isfinite(df.select_dtypes(include='number').to_numpy()).all():
+        raise ValueError("non-finite telemetry")
+    if not df.time_s.is_monotonic_increasing or df.time_s.duplicated().any():
+        raise ValueError("timestamps must strictly increase within a run")
+    if not np.isclose(df.time_s.iloc[-1], duration):
+        raise ValueError("run does not reach requested duration")
+    active = np.zeros(len(df), dtype=bool)
+    for event in events:
+        active |= (df.time_s >= event['onset']) & (df.time_s < event['onset'] + event['duration'])
+    if not np.array_equal(df.fault_active.to_numpy(), active.astype(int)):
+        raise ValueError("fault activity disagrees with event schedule")
+    if not df.loc[~active, 'fault_type'].eq('none').all():
+        raise ValueError("inactive samples carry a fault type")
+    if len({e['type'] for e in events}) == 1 and df.loc[active, 'fault_type'].eq('combined').any():
+        raise ValueError("single fault type incorrectly labelled combined")
+    if not df.fault_severity.between(0, 1).all():
+        raise ValueError("severity must be normalized")
+    egts = df[[f'egt_{i}_c' for i in range(1, 5)]]
+    if not np.allclose(egts.max(axis=1) - egts.min(axis=1), df.egt_split_c, atol=0.011):
+        raise ValueError("EGT split disagrees with sensor channels")
+
+
+def run_all_scenarios(dt=1.0, duration_hours=3.5, seed=42, runs_per_scenario=3):
+    """Return telemetry and provenance. Group evaluation by run_id: a run_id
+    shares one mission across all scenarios and must stay in one data split.
+    Three runs allow a basic grouped split; they do not establish real-world validity.
+    """
+    duration = float(duration_hours) * 3600.0
+    if not np.isfinite(dt) or dt <= 0 or not np.isfinite(duration) or duration <= 0:
+        raise ValueError("dt and duration must be finite and positive")
+    if not isinstance(runs_per_scenario, int) or runs_per_scenario < 1:
+        raise ValueError("runs_per_scenario must be a positive integer")
+    seed_sequence = np.random.SeedSequence(seed)
     rows = []
     meta = {
-        'generated_at': datetime.now(tz=None).isoformat(),
-        'simulator': 'Rotax915Simulator (MVP v1)',
-        'engine_model': 'ROTAX 915 i A / C24 (see engine-baseline.md)',
-        'variant_note': (
-            'The SIH problem statement references ROTAX 915 iS series. '
-            'This simulator implements the 915 i A/C24 baseline from '
-            'docs/engine-baseline.md. Differences vs 915 iS are TBD until '
-            'the correct manual set is obtained. Do not treat ASSUMPTION '
-            'values as manufacturer specifications for the iS variant.'
-        ),
-        'mission_profile': mission,
-        'scenarios': [],
-        'evidence_policy': (
-            'SOURCE = directly from BRP-Rotax manuals (OM, IM, MMH). '
-            'DERIVED = calculated from source-backed values. '
-            'ASSUMPTION = engineering judgement where manuals are silent. '
-            'TBD = not yet defined. '
-            'See engine-baseline.md sections 0 and 20 for full policy.'
-        ),
-        'columns': [],
-        'row_count': 0,
-        'fault_event_count': 0,
+        'schema_version': 2,
+        'generated_at': datetime.now(timezone.utc).isoformat(),
+        'simulator': 'Rotax915Simulator reviewed synthetic model v2',
+        'engine_model': 'ROTAX 915 i A / C24 reference',
+        'evidence_policy': 'Rated limits are reference values; dynamics, BSFC, fault amplitudes and mission variations remain uncalibrated engineering assumptions.',
+        'source_sha256': {
+            'simulator': hashlib.sha256(Path(simulator_module.__file__).read_bytes()).hexdigest(),
+            'generator': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        },
+        'numpy_version': np.__version__, 'pandas_version': pd.__version__,
+        'seed': seed, 'duration_hours': duration_hours, 'time_step_s': dt,
+        'runs_per_scenario': runs_per_scenario,
+        'feature_columns': FEATURE_COLUMNS, 'label_columns': LABEL_COLUMNS,
+        'split_group_column': 'run_id',
+        'label_semantics': {
+            'fault_active': 'Any scheduled positive-severity event in [onset, end); severity is zero exactly at onset.',
+            'fault_severity': 'Maximum effective normalized severity after the 60-second ramp.',
+            'active_faults': 'JSON list of active types; EGT identities include :sensor_id (1..4).',
+            'fault_severities': 'JSON mapping from active identity to effective severity.',
+            'has_fault': 'Scenario contains a fault event; NOT a current-fault target.',
+            'health_score': 'Limited observable-condition indicator, not complete fault ground truth.',
+        },
+        'scenarios': [], 'fault_event_count': 0,
     }
-
-    for scenario_name, scenario_desc, fault_defs in SCENARIOS:
-        sim = Rotax915Simulator(dt=dt, duration=duration)
-        sim.set_mission_profile(mission)
-
-        # Inject faults — use inject_faults for combined scenarios,
-        # inject_fault for single-fault scenarios, skip if empty
-        if len(fault_defs) > 1:
-            sim.inject_faults([(ft, sv, on, du) for ft, sv, on, du in fault_defs])
-        elif len(fault_defs) == 1:
-            ft, sv, on, du = fault_defs[0]
-            sim.inject_fault(ft, severity=sv, onset_time=on, duration=du)
-        # else: empty list — healthy baseline, no faults injected
-
-        meta['fault_event_count'] += len(fault_defs)
-
-        # Run
-        df = sim.run()
-
-        # Add scenario labels
-        df['scenario_name'] = scenario_name
-        df['scenario_description'] = scenario_desc
-        df['has_fault'] = int(len(fault_defs) > 0)
-
-        # Record meta for this scenario
-        tmin = float(df['time_s'].min())
-        tmax = float(df['time_s'].max())
-        meta['scenarios'].append({
-            'name': scenario_name,
-            'description': scenario_desc,
-            'fault_count': len(fault_defs),
-            'row_count': len(df),
-            'time_range_s': [tmin, tmax],
-        })
-
-        rows.append(df)
-
-        print(f"  [OK] {scenario_name:40s}  {len(df):6d} rows  "
-              f"fault={'yes' if len(fault_defs) > 0 else 'no'}"
-              f"  t=[{df['time_s'].min():.0f}, {df['time_s'].max():.0f}]s")
-
-    # Concatenate
+    for run_index, child_seed in enumerate(seed_sequence.spawn(runs_per_scenario)):
+        run_seed = int(child_seed.generate_state(1)[0])
+        rng = np.random.default_rng(run_seed)
+        mission = prepare_mission(duration, rng, vary=runs_per_scenario > 1)
+        flight_end = duration - mission[-1]['duration']
+        for scenario_name, scenario_desc, definitions in SCENARIOS:
+            simulation_seed = int(rng.integers(0, 2**32))
+            events = []
+            for definition in definitions:
+                ft, severity, onset, event_duration = definition[:4]
+                if runs_per_scenario > 1:
+                    onset *= float(rng.uniform(0.85, 1.15))
+                if onset + 60 >= flight_end:
+                    raise ValueError(f"{scenario_name}: fault must ramp in before landing; increase duration")
+                events.append((ft, severity, onset, event_duration, *definition[4:]))
+            sim = Rotax915Simulator(dt=dt, duration=duration, seed=simulation_seed)
+            sim.set_mission_profile(mission)
+            sim.inject_faults(events)
+            df = sim.run()
+            validate_run(df, sim._events, duration)
+            df['scenario_name'] = scenario_name
+            df['scenario_description'] = scenario_desc
+            df['has_fault'] = int(bool(events))
+            df['run_id'] = f'run_{run_index:03d}'
+            df['simulation_seed'] = simulation_seed
+            rows.append(df)
+            meta['fault_event_count'] += len(events)
+            meta['scenarios'].append({
+                'name': scenario_name, 'description': scenario_desc,
+                'run_id': f'run_{run_index:03d}', 'run_seed': run_seed,
+                'simulation_seed': simulation_seed, 'mission_profile': mission,
+                'events': [{**e, 'duration': None if np.isinf(e['duration']) else e['duration']}
+                           for e in sim._events],
+                'fault_count': len(events), 'row_count': len(df),
+                'time_range_s': [float(df.time_s.iloc[0]), float(df.time_s.iloc[-1])],
+            })
+            print(f"[OK] run={run_index} {scenario_name}: {len(df)} rows", flush=True)
     combined = pd.concat(rows, ignore_index=True)
-
-    # Round numeric columns for cleaner CSV
-    numeric_cols = combined.select_dtypes(include='number').columns
-    for col in numeric_cols:
-        combined[col] = combined[col].round(6)
-
-    # Store column order meta
-    meta['columns'] = [str(c) for c in combined.columns]
+    meta['columns'] = list(combined.columns)
     meta['row_count'] = len(combined)
-    meta['duration_hours'] = duration / 3600.0
-    meta['time_step_s'] = dt
-
-    print(f"\n  Total: {len(combined):,} rows across {len(SCENARIOS)} scenarios")
-    print(f"  Output: {CSV_PATH}")
-
+    meta['scenario_count'] = len(SCENARIOS)
+    meta['non_feature_columns'] = [c for c in combined.columns if c not in FEATURE_COLUMNS]
     return combined, meta
 
 
 def main():
-    print("=" * 70)
-    print("  SIH26054 — Dataset Generator")
-    print("  ROTAX 915 Digital Twin — Physics-Based Telemetry")
-    print("=" * 70)
-    print(f"\n  Time step: 1.0 s   Duration: 3.5 h per scenario")
-    print(f"  Mission phases: 10   Scenarios: {len(SCENARIOS)}")
-    print()
-
-    combined, meta = run_all_scenarios(dt=1.0, duration_hours=3.5)
-
-    # Write CSV
+    combined, meta = run_all_scenarios()
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
     combined.to_csv(CSV_PATH, index=False)
-
-    # Write metadata
     with open(META_PATH, 'w') as f:
-        json.dump(meta, f, indent=2, default=str)
-
-    print(f"  Metadata: {META_PATH}")
-    print()
-    print("=" * 70)
-    print("  Generated dataset.csv — ready for ML layer")
-    print(f"  Rows: {meta['row_count']:,}")
-    print(f"  Columns: {len(meta['columns'])}")
-    print(f"  Scenarios: {len(meta['scenarios'])}")
-    print(f"  Fault events: {meta['fault_event_count']}")
-    print("=" * 70)
-
-    # Quick summary of columns
-    print("\n  Column summary:")
-    signal_cols = [c for c in meta['columns'] if not c.startswith('scenario') and c not in ('has_fault',)]
-    for c in signal_cols:
-        print(f"    - {c}")
-
-    print("\n  Scenario breakdown:")
-    for s in meta['scenarios']:
-        print(f"    {s['name']:40s}  {s['row_count']:6d} rows")
-
+        json.dump(meta, f, indent=2, allow_nan=False)
+    print(f"Wrote {len(combined):,} rows to {CSV_PATH}")
+    print(f"Metadata: {META_PATH}")
     return combined
 
 

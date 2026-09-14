@@ -14,9 +14,10 @@
 # Differences between 915 i A/C24 and 915 iS are TBD until the correct manual set
 # is obtained. Do not present ASSUMPTION values as manufacturer specifications.
 
+import json
 import numpy as np
 import pandas as pd
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional, List, Dict
 from enum import Enum
 
@@ -58,7 +59,7 @@ class EngineState:
 
     # --- Air path ---
     airflow: float = 0.0                    # kg/s (ASSUMPTION — Display CAN availability TBD)
-    manifold_pressure: float = 60.0         # mbar (SOURCE: MAPS 1/2, OM 2.1)
+    manifold_pressure: float = 125.0         # mbar (SOURCE: MAPS 1/2, OM 2.1)
     manifold_temperature: float = 25.0      # °C   (SOURCE: MATS 1/2)
     boost_pressure: float = 0.0             # mbar above ambient (SOURCE: BPS, OM 7.6)
 
@@ -100,29 +101,16 @@ class EngineState:
 
 @dataclass
 class FaultConfig:
-    """Active fault injection state."""
-
+    """Effective fault amplitudes for the current sample (all normalized).
+    Event schedules live separately so repeated injections retain their timing.
+    """
     active: bool = False
-    fault_type: str = "none"
-    severity: float = 0.0                   # 0.0 - 1.0
-    onset_time: float = 0.0                 # seconds from simulation start
-    duration: float = float('inf')          # seconds (inf = permanent)
-    fault_types: list = field(default_factory=list)  # for combined scenarios
-
-    # Per-fault degradation parameters (accumulated by inject_faults)
     oil_degradation: float = 0.0
     coolant_leak: float = 0.0
     fuel_filter_clog: float = 0.0
     injector_degradation: float = 0.0
     bearing_wear: float = 0.0
     sensor_drift: float = 0.0
-    egt_sensor_fault_id: int = -1           # -1 = none, 0-3 = which EGT sensor
-    egt_sensor_bias: float = 0.0            # °C bias on faulty sensor
-    fault_onsets: dict = field(default_factory=dict)  # per-fault onset times
-
-    # Base severity values snapshot — stored so gating can ramp from 0
-    # back to full without losing the intended severity.
-    _base_severity: dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -227,37 +215,16 @@ class Rotax915Simulator:
 
     # Fuel flow model (ASSUMPTION — shape from OM 5.1-5.2, scale TBD)
     FUEL_FLOW_IDLE = 1.5                   # L/h  (ASSUMPTION — idle burn)
-    FUEL_FLOW_MAX_POWER = 5.5              # L/h  (ASSUMPTION — full takeoff power)
+    FUEL_DENSITY_KG_L = 0.745              # ASSUMPTION: gasoline density
+    BSFC_ECO = 0.270                      # kg/kWh, ASSUMPTION, uncalibrated
+    BSFC_POWER = 0.300                    # kg/kWh, ASSUMPTION, enrichment
 
-    # Airflow model (ASSUMPTION — displacement estimate for 915 series)
-    ESTIMATED_DISPLACEMENT_L = 1.495       # L    (ASSUMPTION — 4-cyl, ~1.5L)
+    # Airflow model (SOURCE displacement, ASSUMPTION volumetric efficiency)
+    ESTIMATED_DISPLACEMENT_L = 1.352       # L    (SOURCE — 915 total displacement, 1.352 L)
     VOLUMETRIC_EFFICIENCY = 0.80           # —    (ASSUMPTION)
 
     # Mission profile transition smoothing (ASSUMPTION)
     PHASE_TRANSITION_TC = 5.0              # seconds (ASSUMPTION)
-
-    # Standard atmosphere approximation for ambient pressure by altitude (ASSUMPTION)
-    # Using simplified barometric formula: P = 1013.25 * (1 - 2.2557e-5 * h)^5.2558
-    ALTITUDE_PRESSURE_TABLE = {
-        0: 1013.0,
-        1000: 1001.0,
-        2000: 989.0,
-        3000: 977.0,
-        4000: 965.0,
-        5000: 953.0,
-        6000: 941.0,
-        7000: 929.0,
-        8000: 917.0,
-        9000: 905.0,
-        10000: 893.0,
-        12000: 869.0,
-        14000: 845.0,
-        16000: 821.0,
-        18000: 797.0,
-        20000: 774.0,
-        22000: 751.0,
-        23000: 739.0,
-    }
 
     ALTITUDE_TEMP_LAPSE = -0.0065          # °C/m (ASSUMPTION — standard lapse rate)
 
@@ -265,12 +232,17 @@ class Rotax915Simulator:
     # Constructor
     # =========================================================================
 
-    def __init__(self, dt: float = 1.0, duration: float = 3600.0):
+    def __init__(self, dt: float = 1.0, duration: float = 3600.0, seed: int | None = None):
         """
         Args:
             dt:        Time step in seconds (default 1.0 → 1 Hz telemetry)
             duration:  Total simulation duration in seconds
         """
+        if not np.isfinite(dt) or dt <= 0 or not np.isfinite(duration) or duration <= 0:
+            raise ValueError("dt and duration must be finite and positive")
+        self.rng = np.random.default_rng(seed)
+        self._events = []
+        self._egt_biases = np.zeros(4)
         self.dt = dt
         self.duration = duration
         self.time = 0.0
@@ -306,11 +278,24 @@ class Rotax915Simulator:
             ambient_temp:     °C   (optional, defaults to 25°C)
             ambient_pressure: hPa  (optional, auto-computed from altitude if omitted)
 
-        The simulator linearly interpolates between phase targets with a
-        first-order lag (PHASE_TRANSITION_TC). This avoids instantaneous
-        jumps that would be unphysical.
+        RPM and throttle follow a first-order lag. Altitude moves linearly
+        from the previous endpoint to this endpoint over the phase duration.
+        ambient_temp is a sea-level reference, not the local temperature.
         """
-        self.mission_profile = list(phases)  # shallow copy
+        if not phases:
+            raise ValueError("mission profile must contain at least one phase")
+        for phase in phases:
+            MissionPhase(phase['phase'])
+            for key in ('duration', 'target_rpm', 'target_throttle', 'target_altitude'):
+                if not np.isfinite(phase[key]):
+                    raise ValueError(f"{key} must be finite")
+            if phase['duration'] <= 0:
+                raise ValueError("phase durations must be positive")
+            if not self.RPM_IDLE_MIN <= phase['target_rpm'] <= self.RPM_MAX:
+                raise ValueError("target RPM outside model range")
+            if not 0 <= phase['target_throttle'] <= 1 or not 0 <= phase['target_altitude'] <= self.ALTITUDE_MAX:
+                raise ValueError("invalid throttle or altitude")
+        self.mission_profile = [dict(p) for p in phases]
         self._current_phase_idx = 0
         self._load_phase(0)
 
@@ -335,20 +320,9 @@ class Rotax915Simulator:
         # else: stay at last phase targets (simulation holds)
 
     def _altitude_to_pressure(self, altitude_ft: float) -> float:
-        """Approximate ambient pressure at a given altitude (ASSUMPTION)."""
-        # Interpolate from table
-        alts = sorted(self.ALTITUDE_PRESSURE_TABLE.keys())
-        if altitude_ft <= alts[0]:
-            return self.ALTITUDE_PRESSURE_TABLE[alts[0]]
-        if altitude_ft >= alts[-1]:
-            return self.ALTITUDE_PRESSURE_TABLE[alts[-1]]
-        for i in range(len(alts) - 1):
-            if alts[i] <= altitude_ft <= alts[i + 1]:
-                frac = (altitude_ft - alts[i]) / (alts[i + 1] - alts[i])
-                return self.ALTITUDE_PRESSURE_TABLE[alts[i]] + \
-                       frac * (self.ALTITUDE_PRESSURE_TABLE[alts[i + 1]] -
-                               self.ALTITUDE_PRESSURE_TABLE[alts[i]])
-        return 1013.0
+        """Tropospheric standard-atmosphere approximation; altitude input is feet."""
+        h_m = float(np.clip(altitude_ft, 0.0, self.ALTITUDE_MAX)) * 0.3048
+        return 1013.25 * (1.0 - 2.2557e-5 * h_m) ** 5.2558
 
     def _altitude_to_temperature(self, altitude_ft: float, sea_level_temp: float) -> float:
         """Approximate ambient temperature at altitude (ASSUMPTION — standard lapse)."""
@@ -363,6 +337,9 @@ class Rotax915Simulator:
         """
         Advance one time step and return a snapshot dict suitable for CSV.
         """
+        # Samples describe the state at the end of this time interval.
+        self.time += self.dt
+
         # --- Mission phase advancement ---
         self._update_mission_phase()
 
@@ -385,15 +362,12 @@ class Rotax915Simulator:
         self._compute_coolant_temperature()
         self._compute_egt()
         self._compute_egt_split()
+        self._compute_expected_power()
         self._compute_fuel_flow()
         self._compute_fuel_pressure()
         self._compute_vibration()
-        self._compute_expected_power()
         self.state.health_score = self._compute_health_score()
         self._update_lane_can_state()
-
-        # --- Time ---
-        self.time += self.dt
 
         # --- Record ---
         snapshot = self._make_snapshot()
@@ -405,116 +379,53 @@ class Rotax915Simulator:
     # =========================================================================
 
     def _gate_faults_by_onset(self):
+        """Apply independently timed events. Active windows are [onset, end).
+        Severity ramps over 60 s, reaches the configured value, then switches
+        off at event expiry. Thermal state can retain a physical recovery lag.
         """
-        Apply per-fault onset gating so each fault activates at its own
-        scheduled time, not all at once.
-
-        For each fault parameter, we compute a 0→1 ramp starting at the
-        fault's onset_time. If a fault hasn't been individually timed,
-        fall back to the global fault.onset_time.
-
-        Ramp uses a sigmoid-like smoothstep so faults don't jump abruptly:
-            t < onset   → 0.0 multiplier
-            onset <= t < onset + 60 : smooth ramp 0→1 over 60s
-            t >= onset + 60        → 1.0 multiplier
-
-        We multiply the stored base severity by the gate factor — never
-        zero the stored value, so the effect ramps up smoothly from 0 to
-        full severity rather than being permanently deleted.
-
-        The _base_severity dict stores the intended severity for each fault
-        type at injection time. The public fault.X fields are what the
-        physics code reads; those get gated. The base is never modified.
-        """
-        if not self.fault.active:
-            return
-
-        t = self.time
-        gate_period = 60.0  # seconds for fault to fully ramp in (ASSUMPTION)
-
-        # Per-fault onset from fault_onsets dict; fall back to global onset
-        onset = self.fault.onset_time
-        base = self.fault._base_severity
-
-        param_map = {
-            'oil_degradation': 'oil_degradation',
-            'coolant_leak': 'coolant_leak',
-            'fuel_filter_clog': 'fuel_filter_clog',
-            'injector_degradation': 'injector_degradation',
-            'bearing_wear': 'bearing_wear',
-            'sensor_drift': 'sensor_drift',
-        }
-
-        for fault_key, attr_name in param_map.items():
-            param_onset = self.fault.fault_onsets.get(fault_key, onset)
-            intended = base.get(fault_key, 0.0)
-            if t < param_onset:
-                setattr(self.fault, attr_name, 0.0)
-            elif intended > 0 and t < param_onset + gate_period:
-                # Smooth ramp from 0 to intended severity
-                progress = (t - param_onset) / gate_period
-                # Smoothstep: 3t² - 2t³  (zero slope at endpoints)
-                gate = 3.0 * progress ** 2 - 2.0 * progress ** 3
-                setattr(self.fault, attr_name, intended * gate)
-            # else: t >= onset + gate_period → full intended severity
-            # Leave current as-is (it should already equal intended)
-
-        # EGT sensor bias gating (same pattern)
-        egt_key = 'egt_sensor_fault'
-        egt_onset = self.fault.fault_onsets.get(egt_key, onset)
-        # Find the intended bias from injection: we stored severity, convert
-        egt_intended_sev = base.get(egt_key, 0.0)
-        egt_intended_bias = (egt_intended_sev - int(egt_intended_sev)) * 150.0 \
-            if egt_intended_sev > 0 else 0.0
-        if t < egt_onset:
-            self.fault.egt_sensor_bias = 0.0
-        elif egt_intended_bias != 0.0 and t < egt_onset + gate_period:
-            progress = (t - egt_onset) / gate_period
-            gate = 3.0 * progress ** 2 - 2.0 * progress ** 3
-            self.fault.egt_sensor_bias = egt_intended_bias * gate
+        for name in ('oil_degradation', 'coolant_leak', 'fuel_filter_clog',
+                     'injector_degradation', 'bearing_wear', 'sensor_drift'):
+            setattr(self.fault, name, 0.0)
+        self._egt_biases[:] = 0.0
+        for event in self._events:
+            if not event['onset'] <= self.time < event['onset'] + event['duration']:
+                continue
+            progress = min(1.0, (self.time - event['onset']) / 60.0)
+            severity = event['severity'] * progress ** 2 * (3 - 2 * progress)
+            if event['type'] == 'egt_sensor_fault':
+                idx = event['sensor_id'] - 1
+                self._egt_biases[idx] = max(self._egt_biases[idx], 75.0 * severity)
+            else:
+                name = event['type']
+                setattr(self.fault, name, max(getattr(self.fault, name), severity))
 
     def _update_mission_phase(self):
-        """Advance mission phases and smooth toward targets."""
+        """Integrate commands across phase boundaries; altitude reaches its endpoint
+        over the phase duration, rather than using the engine's five-second lag.
+        Ambient temperature inputs are sea-level reference temperatures.
+        """
         if not self.mission_profile:
             return
-
-        self._phase_duration_remaining -= self.dt
-        if self._phase_duration_remaining <= 0:
-            self._advance_phase()
-
-        # First-order lag toward phase targets
-        alpha = 1.0 - np.exp(-self.dt / self.PHASE_TRANSITION_TC)
-        self.state.rpm += alpha * (self._phase_target_rpm - self.state.rpm)
-        self.state.throttle_position += alpha * (
-            self._phase_target_throttle - self.state.throttle_position
-        )
-        self.state.altitude += alpha * (
-            self._phase_target_altitude - self.state.altitude
-        )
-
-        # Ambient temperature tracks sea-level temp adjusted for altitude
-        target_ambient_temp = self._altitude_to_temperature(
-            self._phase_target_altitude, self._phase_ambient_temp
-        )
-        self.state.ambient_temperature += alpha * (
-            target_ambient_temp - self.state.ambient_temperature
-        )
-
-        # Ambient pressure from altitude
-        target_ambient_pressure = self._altitude_to_pressure(
-            self._phase_target_altitude
-        )
-        self.state.ambient_pressure += alpha * (
-            target_ambient_pressure - self.state.ambient_pressure
-        )
-
-        # Clamp to SOURCE limits
-        self.state.rpm = np.clip(self.state.rpm, self.RPM_IDLE_MIN, self.RPM_MAX)
-        self.state.throttle_position = np.clip(self.state.throttle_position, 0.0, 1.0)
-        self.state.altitude = np.clip(self.state.altitude, 0.0, self.ALTITUDE_MAX)
-        self.state.ambient_temperature = np.clip(
-            self.state.ambient_temperature, self.AMBIENT_TEMP_MIN, self.AMBIENT_TEMP_MAX
-        )
+        interval_start = self.time - self.dt
+        phase_start = 0.0
+        start_altitude = 0.0
+        for idx, phase in enumerate(self.mission_profile):
+            phase_end = phase_start + phase['duration']
+            overlap = min(self.time, phase_end) - max(interval_start, phase_start)
+            if overlap > 0:
+                self._current_phase_idx = idx
+                alpha = -np.expm1(-overlap / self.PHASE_TRANSITION_TC)
+                self.state.rpm += alpha * (phase['target_rpm'] - self.state.rpm)
+                self.state.throttle_position += alpha * (phase['target_throttle'] - self.state.throttle_position)
+                progress = (min(self.time, phase_end) - phase_start) / phase['duration']
+                self.state.altitude = start_altitude + progress * (phase['target_altitude'] - start_altitude)
+                self.state.ambient_temperature = self._altitude_to_temperature(
+                    self.state.altitude, phase.get('ambient_temp', 25.0))
+                self.state.ambient_pressure = phase.get('ambient_pressure', self._altitude_to_pressure(self.state.altitude))
+            phase_start = phase_end
+            start_altitude = phase['target_altitude']
+        # A caller stepping beyond the profile explicitly holds the final state.
+        # The dataset generator requires mission duration == run duration.
 
     # =========================================================================
     # Physics models
@@ -523,7 +434,7 @@ class Rotax915Simulator:
     def _compute_operating_mode(self):
         """ECO vs POWER (SOURCE: OM 5.3, ~97% throttle threshold)."""
         if self.state.throttle_position >= self.ECO_THRESHOLD or \
-           self.state.lane_b_state != "ACTIVE":
+           self.state.lane_b_state != "ACTIVE" or self.state.lane_a_state != "ACTIVE":
             self.state.operating_mode = OperatingMode.POWER.value
         else:
             self.state.operating_mode = OperatingMode.ECO.value
@@ -579,51 +490,16 @@ class Rotax915Simulator:
         )
 
     def _compute_manifold_temperature(self):
+        """Ideal-gas compressor heating with assumed efficiencies.
+        Approximate compressor outlet pressure by manifold pressure; at idle
+        the throttle vacuum is not treated as compressor expansion cooling.
+        Compressor efficiency 0.72, intercooler effectiveness 0.70 and intake
+        heat soak +2 C are uncalibrated assumptions. Limits remain diagnostic.
         """
-        Manifold air temperature after turbo + intercooler.
-
-        SOURCE: MATS sensor exists (OM). Intercooler is part of air path
-        (OM 7.6, pp. 7-18 to 7-20).
-
-        ASSUMPTION: simplified thermal model.
-        A turbocharged engine's intake charge is always at or above ambient
-        temperature — the turbo compresses air (heating it), the intercooler
-        removes ~70% of the rise. At zero boost, MATS tracks ambient with a
-        small positive offset from intake-path heating.
-
-        The old adiabatic formula (T after_turbo = T_amb * (P_ratio)^((γ-1)/γ))
-        produces values BELOW ambient when P_ratio < 1 (deceleration / idle),
-        which is physically wrong for a forced-induction engine. Replaced with
-        a linear boost-to-temp model.
-
-        NOTE: Exact temperature behavior is not published in the uploaded
-        BRP-Rotax manuals. This is an ASSUMPTION that should be calibrated
-        against real or experimentally determined data when available.
-        """
-        t_ambient_c = self.state.ambient_temperature
-        boost = self.state.boost_pressure  # mbar above ambient
-
-        # Temperature rise from compression, before intercooler.
-        # ASSUMPTION: ~0.10°C per mbar of boost (tuned so that at full rated
-        # boost ~500 mbar, pre-intercooler T rise is ~50°C above ambient).
-        pre_ic_rise = boost * 0.10  # °C
-
-        # Intercooler removes 70% (ASSUMPTION — matches OM 7.6 description)
-        intercooler_eff = 0.70
-        post_ic_rise = pre_ic_rise * (1.0 - intercooler_eff)
-
-        # At zero boost, intake charge is slightly above ambient from
-        # ram-air heating / intake path inefficiency (ASSUMPTION, ~2°C).
-        intake_offset = 2.0  # °C (ASSUMPTION — non-zero even at zero boost)
-
-        self.state.manifold_temperature = t_ambient_c + intake_offset + post_ic_rise
-
-        # Clamp to source limits (MAT > 50°C → reduced power in ECO mode per OM 2.1)
-        self.state.manifold_temperature = np.clip(
-            self.state.manifold_temperature,
-            self.AMBIENT_TEMP_MIN - 5.0,  # don't go far below ambient
-            self.MAT_EXTENDED_MAX
-        )
+        ambient_k = self.state.ambient_temperature + 273.15
+        ratio = max(1.0, self.state.manifold_pressure / self.state.ambient_pressure)
+        compression_rise = ambient_k * (ratio ** (2.0 / 7.0) - 1.0) / 0.72
+        self.state.manifold_temperature = self.state.ambient_temperature + 2.0 + 0.30 * compression_rise
 
     def _compute_airflow(self):
         """
@@ -641,13 +517,12 @@ class Rotax915Simulator:
         manifold_mbar = self.state.manifold_pressure
         manifold_temp_c = self.state.manifold_temperature
         manifold_temp_k = manifold_temp_c + 273.15
-        density = manifold_mbar / (manifold_temp_k * 287.0)  # kg/m³  (mbar → hPa, R=287)
+        density = manifold_mbar * 100.0 / (manifold_temp_k * 287.0)  # Pa / (J/kg/K * K)
 
-        # Mass flow per cylinder: density * displacement_volume * RPM/60 * VE
-        # 4 cylinders
+        # Total displacement; one intake stroke per two crankshaft revolutions
         displacement_m3 = self.ESTIMATED_DISPLACEMENT_L * 1e-3
-        airflow = density * displacement_m3 * (self.state.rpm / 60.0) * \
-                  self.VOLUMETRIC_EFFICIENCY * 4.0
+        airflow = density * displacement_m3 * (self.state.rpm / 120.0) * \
+                  self.VOLUMETRIC_EFFICIENCY
 
         self.state.airflow = max(0.0, airflow)  # kg/s
 
@@ -689,9 +564,7 @@ class Rotax915Simulator:
         if self.fault.oil_degradation > 0:
             pressure *= (1.0 - 0.4 * self.fault.oil_degradation)
 
-        self.state.oil_pressure = np.clip(
-            pressure, self.OIL_PRESSURE_MIN_LOW_RPM, self.OIL_PRESSURE_MAX_COLD
-        )
+        self.state.oil_pressure = max(0.0, pressure)
 
     def _compute_oil_temperature(self):
         """
@@ -703,27 +576,17 @@ class Rotax915Simulator:
         ASSUMPTION: first-order thermal model. Heat input proportional to
         RPM × throttle (power). Cooling proportional to (T_oil - T_ambient).
         """
-        # Heat generation (ASSUMPTION — proportional to mechanical work)
+        # First-order approach to a load-dependent equilibrium temperature.
+        # This avoids the previous dimensional mismatch where a very large °C/s
+        # heat term forced the state into the 130°C safety clamp almost instantly.
         power_fraction = (self.state.rpm / self.RPM_MAX) * self.state.throttle_position
-        heat_input = 80.0 * power_fraction  # °C/s scale (ASSUMPTION)
-
-        # Cooling to ambient
-        cooling = (self.state.oil_temperature - self.state.ambient_temperature) / \
-                  self.OIL_THERMAL_TC
-
-        # Net rate
-        dT = (heat_input - cooling) * self.dt
-
-        # Oil degradation → runs hotter (ASSUMPTION: degraded oil, worse cooling)
-        if self.fault.oil_degradation > 0:
-            dT *= (1.0 + 0.4 * self.fault.oil_degradation)
+        target_temp = self.state.ambient_temperature + 45.0 + 55.0 * power_fraction
+        # Degraded lubrication raises the equilibrium temperature (ASSUMPTION).
+        target_temp += 25.0 * self.fault.oil_degradation
+        dT = (target_temp - self.state.oil_temperature) * (-np.expm1(-self.dt / self.OIL_THERMAL_TC))
 
         self.state.oil_temperature += dT
-        self.state.oil_temperature = np.clip(
-            self.state.oil_temperature,
-            self.OIL_TEMP_START_MIN,
-            self.OIL_TEMP_NORMAL_MAX
-        )
+
 
     def _compute_coolant_temperature(self):
         """
@@ -736,26 +599,16 @@ class Rotax915Simulator:
         (pump speed). Coolant leak fault reduces cooling.
         """
         power_fraction = (self.state.rpm / self.RPM_MAX) * self.state.throttle_position
-        heat_input = 60.0 * power_fraction  # °C/s scale (ASSUMPTION)
-
-        # Cooling increases with RPM (pump speed) — ASSUMPTION
+        # First-order approach to a load-dependent equilibrium temperature.
+        target_temp = self.state.ambient_temperature + 50.0 + 45.0 * power_fraction
+        # A leak reduces cooling effectiveness, represented as a higher equilibrium.
+        target_temp += 30.0 * self.fault.coolant_leak
         flow_factor = 1.0 + 0.8 * (self.state.rpm / self.RPM_MAX)
         effective_tc = self.COOLANT_THERMAL_TC / flow_factor
-        cooling = (self.state.coolant_temperature - self.state.ambient_temperature) / \
-                  effective_tc
-
-        dT = (heat_input - cooling) * self.dt
-
-        # Coolant leak → reduced cooling → runs hotter (ASSUMPTION)
-        if self.fault.coolant_leak > 0:
-            dT *= (1.0 + 0.6 * self.fault.coolant_leak)
+        dT = (target_temp - self.state.coolant_temperature) * (-np.expm1(-self.dt / effective_tc))
 
         self.state.coolant_temperature += dT
-        self.state.coolant_temperature = np.clip(
-            self.state.coolant_temperature,
-            self.OIL_TEMP_START_MIN,
-            self.COOLANT_TEMP_MAX
-        )
+
 
     def _compute_egt(self):
         """
@@ -781,35 +634,23 @@ class Rotax915Simulator:
         egt_base = np.clip(egt_base, 100.0, self.EGT_MAX)
 
         # Per-cylinder variation (ASSUMPTION — independent noise per cylinder)
-        self.state.egt_1 = egt_base + np.random.normal(0, self.EGT_PER_CYL_VAR)
-        self.state.egt_2 = egt_base + np.random.normal(0, self.EGT_PER_CYL_VAR)
-        self.state.egt_3 = egt_base + np.random.normal(0, self.EGT_PER_CYL_VAR)
-        self.state.egt_4 = egt_base + np.random.normal(0, self.EGT_PER_CYL_VAR)
+        self.state.egt_1 = egt_base + self.rng.normal(0, self.EGT_PER_CYL_VAR)
+        self.state.egt_2 = egt_base + self.rng.normal(0, self.EGT_PER_CYL_VAR)
+        self.state.egt_3 = egt_base + self.rng.normal(0, self.EGT_PER_CYL_VAR)
+        self.state.egt_4 = egt_base + self.rng.normal(0, self.EGT_PER_CYL_VAR)
 
         # Injector degradation → lower EGT (ASSUMPTION: reduced combustion efficiency)
         if self.fault.injector_degradation > 0:
             reduction = self.fault.injector_degradation * 60.0  # °C per unit severity
-            self.state.egt_1 = max(100.0, self.state.egt_1 - reduction)
-            self.state.egt_2 = max(100.0, self.state.egt_2 - reduction)
-            self.state.egt_3 = max(100.0, self.state.egt_3 - reduction)
-            self.state.egt_4 = max(100.0, self.state.egt_4 - reduction)
+            self.state.egt_1 -= reduction
+            self.state.egt_2 -= reduction
+            self.state.egt_3 -= reduction
+            self.state.egt_4 -= reduction
 
-        # Specific EGT sensor bias fault
-        if self.fault.egt_sensor_fault_id >= 0:
-            bias = self.fault.egt_sensor_bias
-            if self.fault.egt_sensor_fault_id == 0:
-                self.state.egt_1 += bias
-            elif self.fault.egt_sensor_fault_id == 1:
-                self.state.egt_2 += bias
-            elif self.fault.egt_sensor_fault_id == 2:
-                self.state.egt_3 += bias
-            elif self.fault.egt_sensor_fault_id == 3:
-                self.state.egt_4 += bias
-
-        # Clamp to SOURCE max
-        for attr in ('egt_1', 'egt_2', 'egt_3', 'egt_4'):
-            val = getattr(self.state, attr)
-            setattr(self.state, attr, np.clip(val, 50.0, self.EGT_MAX))
+        # Measurement-only bias. Operating limits are diagnostic thresholds,
+        # not saturation bounds on a sensor reading.
+        for idx, attr in enumerate(('egt_1', 'egt_2', 'egt_3', 'egt_4')):
+            setattr(self.state, attr, getattr(self.state, attr) + self._egt_biases[idx])
 
     def _compute_egt_split(self):
         """EGT split = max(EGT) - min(EGT) — SOURCE-backed formula (OM 2.1, p. 2-6)."""
@@ -817,37 +658,15 @@ class Rotax915Simulator:
         self.state.egt_split = max(egts) - min(egts)
 
     def _compute_fuel_flow(self):
+        """Uncalibrated BSFC approximation coupled to shaft power, in L/h.
+        ECO: 270 g/kWh; POWER: 300 g/kWh (engineering assumptions).
+        These imply roughly 28-31% efficiency for gasoline, not manufacturer maps.
         """
-        Estimated fuel flow.
-
-        SOURCE: Rotax Performance & Fuel Consumption Model uses RPM, throttle,
-        ambient pressure, ambient temperature (OM 5.1-5.2, pp. 5-2 to 5-3).
-        Fuel flow data in kg/h with 10% tolerance.
-
-        ASSUMPTION: simplified model calibrated to reasonable L/h range.
-        Actual values TBD until electronic model is obtained.
-        """
-        rpm_factor = (self.state.rpm - self.RPM_IDLE_MIN) / (self.RPM_MAX - self.RPM_IDLE_MIN)
-        rpm_factor = np.clip(rpm_factor, 0.0, 1.0)
-
-        # ECO mode → lower fuel flow (ASSUMPTION)
-        mode_factor = 0.85 if self.state.operating_mode == OperatingMode.ECO.value else 1.0
-
-        # Altitude correction: thinner air → less fuel needed (ASSUMPTION)
-        alt_fraction = self.state.altitude / self.ALTITUDE_MAX
-        alt_factor = 1.0 - 0.25 * alt_fraction
-        alt_factor = max(0.5, alt_factor)
-
-        # Cold start enrichment (ASSUMPTION — ECU enrichs when cold)
-        cold_enrichment = max(0.0, (50.0 - self.state.oil_temperature) / 70.0) * 0.3
-
-        self.state.expected_fuel_flow = (
-            self.FUEL_FLOW_IDLE +
-            (self.FUEL_FLOW_MAX_POWER - self.FUEL_FLOW_IDLE) *
-            rpm_factor * self.state.throttle_position * mode_factor * alt_factor +
-            cold_enrichment
-        )
-        self.state.expected_fuel_flow = max(self.FUEL_FLOW_IDLE, self.state.expected_fuel_flow)
+        bsfc = self.BSFC_POWER if self.state.operating_mode == 'POWER' else self.BSFC_ECO
+        enrichment = 1.0 + 0.15 * np.clip((50.0 - self.state.oil_temperature) / 70.0, 0.0, 1.0)
+        self.state.expected_fuel_flow = max(
+            self.FUEL_FLOW_IDLE, self.state.expected_power * bsfc / self.FUEL_DENSITY_KG_L
+        ) * enrichment
 
     def _compute_fuel_pressure(self):
         """
@@ -857,7 +676,8 @@ class Rotax915Simulator:
         power change (OM 2.1, p. 2-6).
 
         ASSUMPTION: regulated at ~3.05 bar nominal with small dynamic variation.
-        Fuel filter clog → pressure rises (SOURCE: IM 73-00-00, p. 12).
+        Filter restriction lowers downstream rail pressure (ASSUMPTION).
+        The manual's rising-pressure diagnostic refers to an upstream sensor.
         """
         # Nominal target
         target = 3.05  # bar (midpoint of 2.9-3.2)
@@ -869,15 +689,11 @@ class Rotax915Simulator:
 
         pressure = target + dynamic_error * np.sin(self.time / 8.0)
 
-        # Fuel filter clog → pressure increases (SOURCE-backed: IM 73-00-00, p. 12)
+        # Downstream pressure loss from restriction (ASSUMPTION; not upstream filter pressure)
         if self.fault.fuel_filter_clog > 0:
-            pressure += self.fault.fuel_filter_clog * 0.25  # bar per unit (ASSUMPTION)
+            pressure -= self.fault.fuel_filter_clog * 0.8  # bar per unit (ASSUMPTION)
 
-        self.state.fuel_pressure = np.clip(
-            pressure,
-            self.FUEL_PRESSURE_EXCURSION_MIN,
-            self.FUEL_PRESSURE_EXCURSION_MAX
-        )
+        self.state.fuel_pressure = max(0.0, pressure)
 
     def _compute_vibration(self):
         """
@@ -896,31 +712,24 @@ class Rotax915Simulator:
         fault_component = self.VIBRATION_FAULT_PER_SEVERITY * self.fault.bearing_wear
 
         # High-frequency noise (ASSUMPTION)
-        hf_noise = np.random.normal(0, 0.008)
+        hf_noise = self.rng.normal(0, 0.008)
 
         self.vibration_rms = rpm_baseline + fault_component + hf_noise
         self.vibration_rms = max(0.0, self.vibration_rms)
 
     def _compute_expected_power(self):
+        """Healthy reference power with both rated RPM anchors.
+        Throttle scaling, above-critical-altitude derating and hot-intake
+        derating are engineering assumptions, not a calibrated propeller map.
         """
-        Expected power output.
-
-        SOURCE: 104 kW @ 5800 rpm takeoff, 99 kW @ 5500 rpm continuous
-        (OM 2.1, p. 2-2).
-
-        ASSUMPTION: power interpolates between idle (near 0) and max power
-        based on RPM and throttle.
-        """
-        rpm_fraction = (self.state.rpm - self.RPM_IDLE_MIN) / (self.RPM_MAX - self.RPM_IDLE_MIN)
-        rpm_fraction = np.clip(rpm_fraction, 0.0, 1.0)
-
-        if self.state.operating_mode == OperatingMode.POWER.value:
-            power_ref = self.POWER_TAKEOFF
-        else:
-            power_ref = self.POWER_CONTINUOUS
-
-        self.state.expected_power = power_ref * rpm_fraction * self.state.throttle_position
-        self.state.expected_power = max(0.0, self.state.expected_power)
+        rated = np.interp(self.state.rpm,
+                          [self.RPM_IDLE_MIN, self.RPM_CONTINUOUS, self.RPM_MAX],
+                          [0.0, self.POWER_CONTINUOUS, self.POWER_TAKEOFF])
+        altitude_factor = min(1.0, self._altitude_to_pressure(self.state.altitude) /
+                              self._altitude_to_pressure(self.ALTITUDE_CRITICAL))
+        temperature_factor = min(1.0, (273.15 + self.MAT_MAX_NORMAL) /
+                                 (273.15 + self.state.manifold_temperature))
+        self.state.expected_power = rated * self.state.throttle_position * altitude_factor * temperature_factor
 
     def _compute_health_score(self) -> float:
         """
@@ -932,7 +741,7 @@ class Rotax915Simulator:
         - Oil pressure out of normal range (SOURCE limits)
         - Coolant temperature over limit (SOURCE limit)
         - Fuel pressure out of normal range (SOURCE limits)
-        - Active fault degradation (ASSUMPTION penalty weights)
+        - Observable soft indicators (ASSUMPTION penalty weights)
         """
         score = 100.0
 
@@ -967,29 +776,25 @@ class Rotax915Simulator:
            self.state.fuel_pressure > self.FUEL_PRESSURE_NORMAL_MAX:
             score -= 10.0
 
-        # Fault penalties (ASSUMPTION weights)
-        score -= 30.0 * self.fault.oil_degradation
-        score -= 25.0 * self.fault.coolant_leak
-        score -= 20.0 * self.fault.fuel_filter_clog
-        score -= 25.0 * self.fault.injector_degradation
-        score -= 20.0 * self.fault.bearing_wear
+        # Observable-only soft indicators. Never use hidden injected-fault
+        # variables here: health_score may later be consumed by ML/UI and must
+        # not leak the ground-truth fault label.
+        if self.state.oil_temperature > 110.0:
+            score -= min(15.0, (self.state.oil_temperature - 110.0) * 0.75)
+        if self.state.coolant_temperature > 105.0:
+            score -= min(15.0, (self.state.coolant_temperature - 105.0) * 1.0)
+        if self.vibration_rms > 0.12:
+            score -= min(25.0, (self.vibration_rms - 0.12) * 60.0)
+        if self.state.egt_split > 100.0:
+            score -= min(15.0, (self.state.egt_split - 100.0) * 0.08)
 
         return max(0.0, min(100.0, score))
 
     def _update_lane_can_state(self):
+        """Electrical statuses remain placeholders. Mechanical fault labels do
+        not directly manufacture CAN or EMS failures without a causal model.
         """
-        Lane A/B and Display CAN state.
-
-        SOURCE: dual-lane EMS (OM 7.5.1), dual Display CAN (IM 77-00-00).
-        ASSUMPTION: faults can degrade lanes/CAN with low probability.
-        """
-        # Severe bearing wear → possible Lane A degradation (ASSUMPTION)
-        if self.fault.bearing_wear > 0.6 and np.random.random() < 0.0005:
-            self.state.lane_a_state = "DEGRADED"
-
-        # Severe fuel filter clog → possible Display CAN A failure (ASSUMPTION)
-        if self.fault.fuel_filter_clog > 0.7 and np.random.random() < 0.0003:
-            self.state.display_can_a_state = "FAILED"
+        pass
 
     def _get_current_phase(self) -> MissionPhase:
         """Return the currently active mission phase."""
@@ -1003,15 +808,17 @@ class Rotax915Simulator:
 
     def _make_snapshot(self) -> Dict:
         """One row of telemetry data as a dictionary."""
+        active = self._active_severities(self.time)
+        types = sorted({key.split(':')[0] for key in active})
         return {
             # --- Time ---
-            'time_s': round(self.time, 2),
+            'time_s': round(self.time, 9),
 
             # --- Primary inputs ---
             'rpm': round(self.state.rpm, 2),
             'throttle_position': round(self.state.throttle_position, 4),
             'ambient_pressure_hpa': round(self.state.ambient_pressure, 2),
-            'ambient_temperature_c': round(self.state.ambient_temperature, 2),
+            'ambient_temperature_c': round(self.state.ambient_temperature + 10.0 * self.fault.sensor_drift, 2),
             'altitude_ft': round(self.state.altitude, 2),
 
             # --- Air path ---
@@ -1053,9 +860,11 @@ class Rotax915Simulator:
 
             # --- Context ---
             'mission_phase': self._get_current_phase().value,
-            'fault_active': int(self.fault.active),
-            'fault_type': self.fault.fault_type,
-            'fault_severity': round(self.fault.severity, 3),
+            'fault_active': int(self.is_fault_active_at(self.time)),
+            'fault_type': 'none' if not types else types[0] if len(types) == 1 else 'combined',
+            'fault_severity': round(max(active.values(), default=0.0), 6),
+            'active_faults': json.dumps(sorted(active)),
+            'fault_severities': json.dumps(active, sort_keys=True),
         }
 
     # =========================================================================
@@ -1063,11 +872,16 @@ class Rotax915Simulator:
     # =========================================================================
 
     def run(self) -> pd.DataFrame:
-        """Run the full simulation and return a DataFrame."""
-        self.history = []
-        steps = int(self.duration / self.dt)
-        for _ in range(steps):
-            self.step()
+        """Run a fresh simulator through its duration, including a partial last step."""
+        if self.time != 0.0:
+            raise ValueError("run() requires a fresh simulator; use step() to continue")
+        nominal_dt = self.dt
+        try:
+            while self.time < self.duration - 1e-9:
+                self.dt = min(nominal_dt, self.duration - self.time)
+                self.step()
+        finally:
+            self.dt = nominal_dt
         return pd.DataFrame(self.history)
 
     # =========================================================================
@@ -1075,66 +889,46 @@ class Rotax915Simulator:
     # =========================================================================
 
     def inject_faults(self, fault_list):
+        """Append events: (type, severity, onset, duration[, sensor_id]).
+        All severities are in [0, 1]. EGT sensor_id is explicitly 1..4;
+        severity 1 gives +75 C. Repeated events retain independent windows.
         """
-        Inject multiple faults at once (for combined scenarios).
-        ACCUMULATES fault parameters rather than resetting them —
-        so combined_oil_and_bearing actually has both faults active.
-
-        Args:
-            fault_list: list of (fault_type, severity, onset_time, duration) tuples
-        """
-        self.fault.active = True
-        self.fault.fault_type = 'combined'
-        self.fault.severity = max(f[1] for f in fault_list) if fault_list else 0.0
-        self.fault.onset_time = min(f[2] for f in fault_list) if fault_list else 0.0
-        self.fault.duration = max(f[3] for f in fault_list) if fault_list else float('inf')
-        self.fault.fault_types = [f[0] for f in fault_list]
-
-        # Store per-fault onset times for gating
-        self.fault.fault_onsets = {}
-        self.fault._base_severity = {}
-        for ft, sv, onset, dur in fault_list:
-            key = ft if ft != 'egt_sensor_fault' else 'egt_sensor_fault'
-            # Same fault type can be injected multiple times — keep max severity, earliest onset
-            if key not in self.fault._base_severity or sv > self.fault._base_severity[key]:
-                self.fault._base_severity[key] = sv
-            if key not in self.fault.fault_onsets or onset < self.fault.fault_onsets[key]:
-                self.fault.fault_onsets[key] = onset
-
-        # Do NOT reset — accumulate each fault parameter (max severity wins for same type)
-        for fault_type, severity, onset, dur in fault_list:
-            if fault_type == 'oil_degradation':
-                self.fault.oil_degradation = max(self.fault.oil_degradation, severity)
-            elif fault_type == 'coolant_leak':
-                self.fault.coolant_leak = max(self.fault.coolant_leak, severity)
-            elif fault_type == 'fuel_filter_clog':
-                self.fault.fuel_filter_clog = max(self.fault.fuel_filter_clog, severity)
-            elif fault_type == 'injector_degradation':
-                self.fault.injector_degradation = max(self.fault.injector_degradation, severity)
-            elif fault_type == 'bearing_wear':
-                self.fault.bearing_wear = max(self.fault.bearing_wear, severity)
-            elif fault_type == 'sensor_drift':
-                self.fault.sensor_drift = max(self.fault.sensor_drift, severity)
-            elif fault_type == 'egt_sensor_fault':
-                sensor_id = int(severity) % 4
-                bias = (severity - sensor_id) * 150.0
-                if self.fault.egt_sensor_fault_id == -1 or abs(bias) > abs(self.fault.egt_sensor_bias):
-                    self.fault.egt_sensor_fault_id = sensor_id
-                    self.fault.egt_sensor_bias = bias
+        supported = {'oil_degradation', 'coolant_leak', 'fuel_filter_clog',
+                     'injector_degradation', 'bearing_wear', 'sensor_drift', 'egt_sensor_fault'}
+        events = []
+        for definition in fault_list:
+            if len(definition) not in (4, 5):
+                raise ValueError("fault requires type, severity, onset, duration and optional sensor_id")
+            ft, sv, onset, duration = definition[:4]
+            sensor = definition[4] if len(definition) == 5 else None
+            if ft not in supported or not np.isfinite(sv) or not 0 <= sv <= 1:
+                raise ValueError("unknown fault or severity outside [0, 1]")
+            if not np.isfinite(onset) or onset < 0 or np.isnan(duration) or duration <= 0:
+                raise ValueError("invalid fault onset or duration")
+            if ft == 'egt_sensor_fault' and sensor not in (1, 2, 3, 4):
+                raise ValueError("EGT faults require explicit sensor_id in 1..4")
+            if ft != 'egt_sensor_fault' and sensor is not None:
+                raise ValueError("sensor_id applies only to EGT faults")
+            if sv > 0:
+                events.append(dict(type=ft, severity=float(sv), onset=float(onset),
+                                   duration=float(duration), sensor_id=sensor))
+        self._events.extend(events)
+        self.fault.active = bool(self._events)
 
     def inject_fault(self, fault_type: str, severity: float = 0.5,
-                     onset_time: float = 0.0, duration: float = float('inf')):
-        """
-        Inject a single fault. Delegates to inject_faults for consistency.
-        """
-        self.inject_faults([(fault_type, severity, onset_time, duration)])
+                     onset_time: float = 0.0, duration: float = float('inf'),
+                     sensor_id: int | None = None):
+        self.inject_faults([(fault_type, severity, onset_time, duration, sensor_id)])
 
     def is_fault_active_at(self, time_s: float) -> bool:
-        """Check if fault is active at a given time."""
-        if not self.fault.active:
-            return False
-        if time_s < self.fault.onset_time:
-            return False
-        if self.fault.duration < float('inf') and time_s > self.fault.onset_time + self.fault.duration:
-            return False
-        return True
+        return bool(self._active_severities(time_s))
+
+    def _active_severities(self, time_s):
+        active = {}
+        for e in self._events:
+            if e['onset'] <= time_s < e['onset'] + e['duration']:
+                key = e['type'] + (f":{e['sensor_id']}" if e['sensor_id'] else '')
+                progress = min(1.0, (time_s - e['onset']) / 60.0)
+                severity = e['severity'] * progress ** 2 * (3 - 2 * progress)
+                active[key] = max(active.get(key, 0.0), severity)
+        return active
