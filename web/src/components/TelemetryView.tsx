@@ -3,7 +3,15 @@ import { useEffect, useMemo, useState } from "react";
 import { useDashboardStore } from "../store";
 
 export default function TelemetryView() {
-  return <div className="tab-panel"><TelemetryChart /><MetricCards /><FlightPathStrip /><AnomalySummary /></div>;
+  return <div className="tab-panel">
+    <MetricCards />
+    <AnomalySummary />
+    <FlightPathStrip />
+    <section className="telemetry-timeline">
+      <header className="telemetry-timeline__header"><div><p>Detailed view</p><h3>Telemetry timeline</h3></div><span>30 samples · 1 Hz</span></header>
+      <TelemetryChart />
+    </section>
+  </div>;
 }
 
 function TelemetryChart() {

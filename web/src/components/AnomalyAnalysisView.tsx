@@ -23,7 +23,7 @@ export default function AnomalyAnalysisView() {
 
   // Channel-level anomaly scores.
   const channelScores = React.useMemo(() => {
-    const channels = ["Engine RPM", "Oil Pressure (bar)", "EGT Cyl 1 (°C)", "EGT Cyl 2 (°C)", "EGT Cyl 3 (°C)", "EGT Cyl 4 (°C)", "EGT Spread (°C)"];
+    const channels = ["Engine RPM", "Oil Pressure (bar)", "CHT", "MAP", "EGT Cyl 1 (°C)", "EGT Cyl 2 (°C)", "EGT Cyl 3 (°C)", "EGT Cyl 4 (°C)", "EGT Spread (°C)"];
     return channels.map((ch) => {
       const vals = samples
         .map((s) => s[ch as keyof typeof s])
