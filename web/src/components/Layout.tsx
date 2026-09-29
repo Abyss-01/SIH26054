@@ -1,9 +1,25 @@
 import React from "react";
 import { useDashboardStore } from "../store";
-import MissionPlayBar from "./MissionPlayBar";
+import { SCENARIOS, type Scenario } from "../types";
 
 export default function Layout({ children }: { children: React.ReactNode }) {
-  const { snapshot, playing, error } = useDashboardStore();
+  const { snapshot, playing, error, params, setParams, setFlightDistance, fetchSnapshot } = useDashboardStore();
+
+  const selectScenario = (event: React.ChangeEvent<HTMLSelectElement>) => {
+    setParams({ scenario: event.target.value as Scenario });
+    void fetchSnapshot();
+  };
+
+  const setNoise = (event: React.ChangeEvent<HTMLInputElement>) => {
+    setParams({ noise_level: Number(event.target.value) });
+  };
+
+  const refreshSnapshot = () => {
+    setParams({ sample_seed: Math.floor(Math.random() * 10_000) });
+    void fetchSnapshot();
+  };
+
+  const applyNoise = () => void fetchSnapshot();
 
   return (
     <div className="layout">
@@ -27,6 +43,24 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             <p className="layout__subtitle">Engine Telemetry</p>
           </div>
         </div>
+
+        <div className="layout__divider" />
+
+        <div className="layout__sidebar-section layout__controls">
+          <label className="layout__section-label" htmlFor="scenario-preset">Scenario preset</label>
+          <select id="scenario-preset" className="layout__select" value={params.scenario} onChange={selectScenario}>
+            {SCENARIOS.map((preset) => <option key={preset.value} value={preset.value}>{preset.label}</option>)}
+          </select>
+          <p className="layout__control-help">Choose a nominal profile or inject one of the simulated engine faults.</p>
+        </div>
+
+        <div className="layout__sidebar-section layout__controls">
+          <label className="layout__section-label" htmlFor="noise-level">Sensor noise <strong>{params.noise_level.toFixed(1)}</strong></label>
+          <input id="noise-level" className="layout__range" type="range" min="0" max="2" step="0.1" value={params.noise_level} onChange={setNoise} onMouseUp={applyNoise} onTouchEnd={applyNoise} />
+          <div className="layout__range-labels"><span>Stable</span><span>Variable</span></div>
+        </div>
+
+        <button className="layout__new-snapshot" onClick={refreshSnapshot}>New snapshot</button>
 
         <div className="layout__divider" />
 
@@ -77,6 +111,10 @@ export default function Layout({ children }: { children: React.ReactNode }) {
 
       <main className="layout__main">
         {error && <div className="demo-notice" role="status">{error}</div>}
+        <header className="mission-heading">
+          <div><p className="mission-heading__eyebrow">Digital twin demonstrator</p><h2>Every signal tells a story.</h2><p>Explore mission health, inject a fault, and follow the evidence.</p></div>
+          <div className="mission-heading__code">ROTAX 915 iS <span>/</span> UAV–01</div>
+        </header>
         {children}
       </main>
     </div>
