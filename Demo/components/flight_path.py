@@ -5,7 +5,7 @@ import time
 import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
-from config.scenarios import FLIGHT_STAGES, NOMINAL_SCENARIO, SCENARIO_LABELS, resolve_scenario, stage_at_distance
+from Demo.config.scenarios import FLIGHT_STAGES, NOMINAL_SCENARIO, SCENARIO_LABELS, resolve_scenario, stage_at_distance
 
 STAGE_POSITIONS = (10, 35, 80, 145, 210, 260, 295)
 STAGE_BOUNDS = (0, 20, 50, 110, 180, 240, 280, 300)
@@ -81,7 +81,14 @@ def render_flight_path_component(manual_scenario: str) -> tuple[float, str, str]
     with controls[2]:
         st.button("Next →", on_click=move_stage, args=(1,), disabled=st.session_state["flight_distance"] > 280, width="stretch")
     with controls[3]:
-        st.slider("Mission distance (km)", 0, 300, step=5, key="flight_distance", label_visibility="collapsed", on_change=pause_mission)
+        st.slider(
+            "Mission distance (km)",
+            0, 300, step=5,
+            key="flight_distance",
+            label_visibility="visible",
+            help="Drag to scrub through the mission — jump to any stage, not just play forward.",
+            on_change=pause_mission,
+        )
     distance = st.session_state["flight_distance"]
     flight_stage = stage_at_distance(distance)
     scenario = resolve_scenario(manual_scenario, flight_stage)

@@ -11,9 +11,9 @@ import pandas as pd
 from streamlit.testing.v1 import AppTest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from ai_engine import copilot
-from views import settings
-from ai_engine.errors import describe_gemini_error
+from Demo.ai_engine import copilot
+from Demo.views import settings
+from Demo.ai_engine.errors import describe_gemini_error
 
 
 class ProviderFailure(Exception):
@@ -200,7 +200,7 @@ class EvidenceTests(unittest.TestCase):
 REVIEW_APP = """
 import pandas as pd
 import streamlit as st
-from ai_engine.copilot import render_ai_diagnostic_section
+from Demo.ai_engine.copilot import render_ai_diagnostic_section
 st.session_state.setdefault('gemini_api_key', '')
 sample = st.slider('Snapshot', 0, 2, 0)
 frame = pd.DataFrame({'Time (s)': [0, 1], 'Oil Pressure (bar)': [4.0, 3.0 - sample]})
@@ -209,7 +209,7 @@ render_ai_diagnostic_section('6. Oil Pressure Loss / Lubrication Degradation', f
 
 SETTINGS_APP = """
 import streamlit as st
-from views.settings import render_settings_view
+from Demo.views.settings import render_settings_view
 st.session_state.setdefault('gemini_api_key', '')
 st.radio('Navigation', ['dashboard', 'settings'], key='active_page')
 if st.session_state['active_page'] == 'settings':

@@ -9,8 +9,8 @@ from numbers import Integral, Real
 import numpy as np
 import pandas as pd
 
-from config.engine_specs import stage_reference_bands
-from config.scenarios import FLIGHT_STAGES, SCENARIO_OPTIONS, resolve_scenario
+from Demo.config.engine_specs import stage_reference_bands
+from Demo.config.scenarios import FLIGHT_STAGES, SCENARIO_OPTIONS, resolve_scenario
 
 
 WINDOW_SECONDS = 30

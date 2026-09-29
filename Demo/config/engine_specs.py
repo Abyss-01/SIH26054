@@ -4,7 +4,7 @@ These numbers support a synthetic presentation and have not been validated
 against a specific aircraft installation or engine maintenance manual.
 """
 
-from config.scenarios import FLIGHT_STAGES
+from Demo.config.scenarios import FLIGHT_STAGES
 
 
 # Preserved for compatibility. Prefer stage_reference_bands in new displays.

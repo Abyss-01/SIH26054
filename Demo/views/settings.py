@@ -4,11 +4,11 @@ from datetime import datetime, timezone
 
 import streamlit as st
 
-from ai_engine.copilot import (
+from Demo.ai_engine.copilot import (
     GEMINI_MODEL, GENAI_SDK_AVAILABLE, api_configuration_id, request_gemini_text,
     get_gemini_model, list_gemini_models,
 )
-from ai_engine.errors import describe_gemini_error, error_heading
+from Demo.ai_engine.errors import describe_gemini_error, error_heading
 
 
 def _return_to_dashboard():

@@ -1,0 +1,181 @@
+/* Global styles for the AERIS dashboard. */
+
+:root {
+  /* Backgrounds */
+  --color-bg-primary: #0f172a;
+  --color-bg-secondary: #1e293b;
+  --color-bg-tertiary: #334155;
+  --color-bg-elevated: #1e293b;
+
+  /* Foreground */
+  --color-foreground: #f1f5f9;
+  --color-muted-foreground: #94a3b8;
+  --color-muted: #64748b;
+
+  /* Accent */
+  --color-accent: #22d3ee;
+  --color-accent-hover: #06b6d4;
+  --color-accent-subtle: rgba(34, 211, 238, 0.1);
+
+  /* Status */
+  --color-status-normal: #22c55e;
+  --color-status-warning: #f59e0b;
+  --color-status-critical: #ef4444;
+
+  /* Borders */
+  --color-border: #334155;
+  --color-border-strong: #475569;
+
+  /* Sidebar */
+  --color-sidebar-bg: #0f172a;
+  --color-sidebar-border: #1e293b;
+
+  /* Metrics */
+  --color-metric-bg: #1e293b;
+  --color-metric-border: #334155;
+
+  /* Typography */
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", "Consolas", monospace;
+
+  /* Spacing */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+
+  /* Radii */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.3);
+}
+
+/* Reset */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  font-size: 16px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: var(--font-sans);
+  background: var(--color-bg-primary);
+  color: var(--color-foreground);
+  line-height: 1.5;
+  min-height: 100vh;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--color-bg-primary);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border-strong);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-muted);
+}
+
+/* Selection */
+::selection {
+  background: var(--color-accent-subtle);
+  color: var(--color-foreground);
+}
+
+/* Focus */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* Links */
+a {
+  color: var(--color-accent);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+/* Dashboard layout and views */
+.layout { display:grid; grid-template-columns:250px minmax(0,1fr); min-height:100vh; }
+.layout__sidebar { background:#111c32; border-right:1px solid var(--color-border); padding:24px 18px; }
+.layout__brand { display:flex; gap:10px; align-items:center; margin-bottom:22px; }
+.layout__title { font-size:1.15rem; letter-spacing:.14em; }.layout__subtitle,.layout__section-label { color:var(--color-muted-foreground); font-size:.72rem; text-transform:uppercase; letter-spacing:.08em; }
+.layout__divider { height:1px; background:var(--color-border); margin:18px 0; }.layout__sidebar-section { margin:14px 0; }.layout__scenario,.layout__status-stage { display:block; margin-top:6px; font-size:.84rem; color:#dbeafe; }
+.layout__playback-indicator,.layout__status-row { display:flex; gap:8px; align-items:center; margin-top:8px; }.layout__playback-dot { width:8px; height:8px; border-radius:50%; background:var(--color-muted); }.layout__playback-dot--playing { background:var(--color-status-normal); box-shadow:0 0 9px var(--color-status-normal); }
+.layout__status-badge { padding:3px 7px; border-radius:4px; font-size:.7rem; font-weight:700; }.layout__status-badge--normal { background:#14532d; }.layout__status-badge--warning { background:#78350f; }.layout__status-badge--critical { background:#7f1d1d; }
+.layout__main { padding:24px; overflow:hidden; }.tab-bar__tabs { display:flex; gap:6px; overflow:auto; border-bottom:1px solid var(--color-border); }.tab-bar__tab { padding:10px 14px; color:var(--color-muted-foreground); white-space:nowrap; }.tab-bar__tab--active { color:var(--color-accent); border-bottom:2px solid var(--color-accent); }.tab-bar__icon { margin-right:6px; vertical-align:middle; }
+.tab-panel { padding-top:20px; }.telemetry-chart,.table-summary,.anomaly-analysis,.ai-diagnostics { background:var(--color-bg-secondary); border:1px solid var(--color-border); border-radius:var(--radius-lg); padding:16px; }.telemetry-chart { min-height:560px; }.telemetry-chart--skeleton,.empty-state { display:grid; min-height:220px; place-items:center; color:var(--color-muted-foreground); }.metric-cards,.anomaly-analysis__overview-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:12px; margin:16px 0; }.metric-card,.anomaly-analysis__stat-box { background:var(--color-bg-tertiary); border:1px solid var(--color-border); border-radius:var(--radius-md); padding:12px; }.metric-card__label,.anomaly-analysis__stat-label,.anomaly-analysis__stat-desc { color:var(--color-muted-foreground); font-size:.75rem; }.metric-card__value,.anomaly-analysis__stat-value { display:block; font-size:1.2rem; font-weight:700; margin:5px 0; }.metric-card__delta { font-size:.75rem; color:var(--color-status-normal); }.metric-card__delta--negative,.anomaly-analysis__stat-value--critical { color:var(--color-status-critical); }
+.flight-path-strip { margin:18px 0; }.flight-path-strip__track { height:10px; position:relative; background:#0b1220; border-radius:999px; overflow:hidden; }.flight-path-strip__segment,.flight-path-strip__progress { position:absolute; top:0; height:100%; }.flight-path-strip__progress { background:rgba(255,255,255,.28); }.flight-path-strip__marker { position:absolute; top:-4px; height:18px; width:3px; background:#fff; }.flight-path-strip__labels { display:flex; justify-content:space-between; color:var(--color-muted); font-size:.65rem; margin-top:6px; }.flight-path-strip__label--active { color:var(--color-accent); }.flight-path-strip__distance { text-align:right; margin-top:6px; font-size:.8rem; }.anomaly-summary { display:grid; gap:14px; }.anomaly-summary__cluster-value,.anomaly-summary__metric-value { display:block; font-weight:600; }.anomaly-summary__cluster-label,.anomaly-summary__metric-label { color:var(--color-muted); font-size:.72rem; }.anomaly-summary__metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(125px,1fr)); gap:10px; }
+.mission-play-bar { margin:20px 0; padding:14px; background:var(--color-bg-secondary); border:1px solid var(--color-border); border-radius:var(--radius-lg); display:flex; gap:18px; align-items:center; }.mission-play-bar__controls { display:flex; gap:8px; }.mission-play-bar__button,.ai-diagnostics__button { padding:8px 11px; background:#164e63; border-radius:var(--radius-md); font-size:.8rem; }.mission-play-bar__scrubber { flex:1; }.mission-play-bar__scrubber-label { display:flex; justify-content:space-between; font-size:.8rem; }.mission-play-bar__track { position:relative; margin:10px 0; }.mission-play-bar__slider { width:100%; padding:0; accent-color:var(--color-accent); }.mission-play-bar__track-fill,.mission-play-bar__track-marker { display:none; }.mission-play-bar__ticks { display:flex; justify-content:space-between; font-size:.65rem; color:var(--color-muted); }.mission-play-bar__hint { color:var(--color-muted); font-size:.72rem; margin-top:8px; }
+.table-summary__header,.ai-diagnostics__header { display:flex; justify-content:space-between; gap:12px; align-items:center; margin-bottom:14px; }.table-summary__controls,.ai-diagnostics__actions { display:flex; gap:8px; align-items:center; }.table-summary__scroll,.anomaly-analysis__table-scroll { overflow:auto; }.table-summary__table,.anomaly-analysis__table { width:100%; border-collapse:collapse; font-size:.8rem; }.table-summary__th,.table-summary__td,.anomaly-analysis__table th,.anomaly-analysis__table td { padding:9px; text-align:left; border-bottom:1px solid var(--color-border); white-space:nowrap; }.table-summary__row--outlier,.anomaly-analysis__row--outlier { background:rgba(239,68,68,.1); }.table-summary__legend { margin-top:10px; color:var(--color-muted); font-size:.75rem; }
+.anomaly-analysis__section { margin-top:22px; }.anomaly-analysis__section-title { margin-bottom:8px; }.anomaly-analysis__desc { color:var(--color-muted-foreground); font-size:.85rem; margin-bottom:12px; }.anomaly-analysis__channel-bar { display:grid; grid-template-columns:190px 1fr 65px; gap:10px; align-items:center; margin:8px 0; font-size:.8rem; }.anomaly-analysis__channel-bar-track { background:#0b1220; height:8px; border-radius:99px; overflow:hidden; }.anomaly-analysis__channel-bar-fill { height:100%; background:var(--color-accent); }
+.ai-diagnostics__review,.ai-diagnostics__placeholder { line-height:1.6; color:#dbeafe; }.ai-diagnostics__badge { font-size:.72rem; color:var(--color-muted); margin-bottom:12px; }.ai-diagnostics__content h1,.ai-diagnostics__content h2 { margin:14px 0 6px; }.ai-diagnostics__content td { border:1px solid var(--color-border); padding:4px 7px; }.ai-diagnostics__error { color:#fecaca; margin:10px 0; }
+@media (max-width: 800px) { .layout { grid-template-columns:1fr; }.layout__sidebar { border-right:0; border-bottom:1px solid var(--color-border); }.layout__main { padding:14px; }.mission-play-bar { flex-direction:column; align-items:stretch; }.anomaly-analysis__channel-bar { grid-template-columns:110px 1fr 45px; }.flight-path-strip__labels { font-size:.55rem; } }
+
+/* Buttons */
+button {
+  font-family: inherit;
+  cursor: pointer;
+  border: none;
+  background: none;
+  color: inherit;
+}
+
+/* Inputs */
+input, select, textarea {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+input:focus, select:focus, textarea:focus {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-accent-subtle);
+}
+input::placeholder {
+  color: var(--color-muted);
+}
+
+/* Utility classes */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

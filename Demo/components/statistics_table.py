@@ -3,7 +3,7 @@
 import pandas as pd
 import streamlit as st
 
-from config.engine_specs import ENGINE_SPECS
+from Demo.config.engine_specs import ENGINE_SPECS
 
 
 SENSOR_COLUMNS = [

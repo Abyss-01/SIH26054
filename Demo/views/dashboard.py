@@ -2,14 +2,14 @@
 from html import escape
 import json
 import streamlit as st
-from telemetry.generator import generate_telemetry_data
-from config.scenarios import SCENARIO_LABELS
-from components.flight_path import advance_mission, render_flight_path_component
-from components.metrics import render_top_metric_cards
-from components.charts import render_telemetry_charts
-from clustering.visualizer import render_clustering_visualizer
-from components.statistics_table import render_statistics_table
-from ai_engine.copilot import render_ai_diagnostic_section
+from Demo.telemetry.generator import generate_telemetry_data
+from Demo.config.scenarios import SCENARIO_LABELS
+from Demo.components.flight_path import advance_mission, render_flight_path_component
+from Demo.components.metrics import render_top_metric_cards
+from Demo.components.charts import render_telemetry_charts
+from Demo.clustering.visualizer import render_clustering_visualizer
+from Demo.components.statistics_table import render_statistics_table
+from Demo.ai_engine.copilot import render_ai_diagnostic_section
 
 
 def refresh_snapshot():

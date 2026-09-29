@@ -1,4 +1,39 @@
+# Snapshot API tests
+snapshot_api/.venv/
+snapshot_api/.pytest_cache/
+snapshot_api/__pycache__/
+snapshot_api/app/__pycache__/
+snapshot_api/app/*.pyc
+snapshot_api/tests/__pycache__/
+
+# React app
+web/node_modules/
+web/dist/
+web/.vite/
+web/*.tsbuildinfo
+
+# Environment files with secrets
+web/.env
+web/.env.local
+web/.env.*.local
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python (repo-wide)
 __pycache__/
-*.py[cod]
-/data/dataset.csv
-/data/dataset_meta.json
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Demo .env (contains Gemini key placeholder)
+Demo/.env

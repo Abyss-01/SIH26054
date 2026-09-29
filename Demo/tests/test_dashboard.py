@@ -11,8 +11,8 @@ from streamlit.testing.v1 import AppTest
 DEMO_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(DEMO_DIR))
 
-from config.scenarios import AUTO_SCENARIO, FLIGHT_STAGES, SCENARIO_LABELS, SCENARIO_OPTIONS
-from telemetry.generator import generate_telemetry_data
+from Demo.config.scenarios import AUTO_SCENARIO, FLIGHT_STAGES, SCENARIO_LABELS, SCENARIO_OPTIONS
+from Demo.telemetry.generator import generate_telemetry_data
 
 
 def button(app, label):

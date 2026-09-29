@@ -5,9 +5,9 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from components.charts import CHART_COLORS, PLOT_CONFIG, apply_chart_layout
-from components.statistics_table import SENSOR_COLUMNS
-from config.engine_specs import ENGINE_SPECS
+from Demo.components.charts import CHART_COLORS, PLOT_CONFIG, apply_chart_layout
+from Demo.components.statistics_table import SENSOR_COLUMNS
+from Demo.config.engine_specs import ENGINE_SPECS
 
 
 def _analysis_inputs(df, baseline_df, anomaly_scores, outlier_mask):

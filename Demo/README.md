@@ -25,7 +25,11 @@ Open the local URL printed by Streamlit, normally `http://localhost:8501`. Run f
 4. Open **Anomaly Analysis** to see individual flagged samples, the first departure, and the most affected sensor. **Table Summary** lists current values, ranges, and excursions for every channel, with a summary CSV download. Enable **Show table summary** in the sidebar to also display this table beneath the telemetry charts.
 5. In **AI Diagnostics**, select **Generate telemetry review**. This pauses playback and creates a local evidence summary, with optional Gemini interpretation when configured. Download the review as Markdown, or use **Export CSV** and **Snapshot JSON** beneath the tabs.
 
-**New snapshot** changes the random seed and pauses playback. Ordinary reruns preserve the same data. **Reset demo** restores the initial mission, scenario, noise, and seed. Scenario and noise changes pause playback; mission settings survive a visit to AI configuration.
+**New snapshot** changes the random seed and pauses playback. Ordinary reruns preserve the same data. **Reset demo** restores the initial mission, scenario, noise, and seed. Scenario and noise changes pause playback; mission settings survive a visit to AI configuration. A playback indicator in the sidebar shows whether the mission is ▶ Playing or ■ Paused.
+
+### Sharing a snapshot
+
+The browser URL carries the current scenario, noise level, seed, and mission distance as query parameters. Click **Copy share link** in the sidebar to write those values into the URL and copy it to your clipboard. Paste the link into another window, another machine, or a presentation slide — the recipient opens the same snapshot you had, including the active fault and mission position. The core demo works without an API key; a Gemini connection is never shared.
 
 ### Guided tour
 

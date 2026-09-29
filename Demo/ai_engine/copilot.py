@@ -8,7 +8,7 @@ import json
 import numpy as np
 import pandas as pd
 import streamlit as st
-from ai_engine.errors import describe_gemini_error, error_heading
+from Demo.ai_engine.errors import describe_gemini_error, error_heading
 
 try:
     from google import genai

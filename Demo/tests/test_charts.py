@@ -11,10 +11,10 @@ DEMO_DIR = Path(__file__).resolve().parents[1]
 if str(DEMO_DIR) not in sys.path:
     sys.path.insert(0, str(DEMO_DIR))
 
-from components.statistics_table import build_statistics_table
-from clustering.visualizer import _analysis_inputs
-from config.scenarios import FLIGHT_STAGES, NOMINAL_SCENARIO
-from telemetry.generator import generate_telemetry_data
+from Demo.components.statistics_table import build_statistics_table
+from Demo.clustering.visualizer import _analysis_inputs
+from Demo.config.scenarios import FLIGHT_STAGES, NOMINAL_SCENARIO
+from Demo.telemetry.generator import generate_telemetry_data
 
 
 class SensorStatisticsTests(unittest.TestCase):
@@ -75,10 +75,10 @@ class ChartRenderingTests(unittest.TestCase):
     def test_nominal_overlay_toggle_and_sensor_table_render(self):
         app = AppTest.from_string('''
 import streamlit as st
-from config.scenarios import NOMINAL_SCENARIO, FLIGHT_STAGES
-from telemetry.generator import generate_telemetry_data
-from components.charts import render_telemetry_charts
-from components.statistics_table import render_statistics_table
+from Demo.config.scenarios import NOMINAL_SCENARIO, FLIGHT_STAGES
+from Demo.telemetry.generator import generate_telemetry_data
+from Demo.components.charts import render_telemetry_charts
+from Demo.components.statistics_table import render_statistics_table
 bundle = generate_telemetry_data(NOMINAL_SCENARIO, noise_level=0, flight_stage=FLIGHT_STAGES[0])
 show = st.checkbox("Show nominal", value=True)
 render_telemetry_charts(bundle["df"], NOMINAL_SCENARIO, bundle["baseline_df"], show_baseline=show)
@@ -98,9 +98,9 @@ render_statistics_table(bundle["df"], bundle["baseline_df"])
 
     def test_analysis_uses_measured_sample_flags(self):
         app = AppTest.from_string('''
-from config.scenarios import NOMINAL_SCENARIO, FLIGHT_STAGES
-from telemetry.generator import generate_telemetry_data, score_telemetry
-from clustering.visualizer import render_clustering_visualizer
+from Demo.config.scenarios import NOMINAL_SCENARIO, FLIGHT_STAGES
+from Demo.telemetry.generator import generate_telemetry_data, score_telemetry
+from Demo.clustering.visualizer import render_clustering_visualizer
 bundle = generate_telemetry_data(NOMINAL_SCENARIO, noise_level=0, flight_stage=FLIGHT_STAGES[3])
 df = bundle["df"].copy(deep=True)
 df.loc[10, "Oil Pressure (bar)"] = 2.5

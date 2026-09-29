@@ -1,0 +1,21 @@
+---
+# Render blueprint for the AERIS Snapshot API.
+# Import this in the Render dashboard, or use it as the source of truth for
+# the service config. The start command runs uvicorn directly against the FastAPI
+# app object, so it does not depend on the "__main__" block in main.py.
+services:
+  - type: web
+    name: areis-snapshot-api
+    env: python
+    rootDir: .
+    buildCommand: pip install -r snapshot_api/requirements.txt
+    startCommand: uvicorn snapshot_api.app.main:api --host 0.0.0.0 --port $PORT
+    plan: free
+    envVars:
+      - key: ALLOWED_ORIGINS
+        value: http://localhost:5173,http://localhost:3000
+        # Replace with your Supabase Storage URL before pushing to production.
+        # Example: https://<project>.supabase.co/storage/v1/object/public/areis
+      - key: PYTHONPATH
+        value: .
+        # So "import Demo" resolves when the service runs from the repo root.

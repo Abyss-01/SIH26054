@@ -10,12 +10,12 @@ from pandas.testing import assert_frame_equal
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from config.engine_specs import stage_reference_bands
-from config.scenarios import (
+from Demo.config.engine_specs import stage_reference_bands
+from Demo.config.scenarios import (
     AUTO_SCENARIO, FLIGHT_STAGES, NOMINAL_SCENARIO, SCENARIO_OPTIONS,
     resolve_scenario, stage_at_distance,
 )
-from telemetry.generator import EGT_COLUMNS, generate_telemetry_data, score_telemetry
+from Demo.telemetry.generator import EGT_COLUMNS, generate_telemetry_data, score_telemetry
 
 
 class FlightTourTests(unittest.TestCase):
