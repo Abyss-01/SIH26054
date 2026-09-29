@@ -17,6 +17,13 @@ ALLOWED_ORIGINS = [
     if origin.strip()
 ]
 
+# Vercel assigns a unique HTTPS origin to production deployments and previews.
+# Permit those origins by default so the static React demo can reach this public
+# API without a CORS failure. Set ALLOWED_ORIGIN_REGEX to override this policy.
+ALLOWED_ORIGIN_REGEX = os.getenv(
+    "ALLOWED_ORIGIN_REGEX", r"^https://[a-z0-9-]+\.vercel\.app$"
+)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -36,6 +43,7 @@ api = FastAPI(
 api.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=ALLOWED_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
