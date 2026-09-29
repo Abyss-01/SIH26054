@@ -1,5 +1,5 @@
 import Plot from "react-plotly.js";
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useDashboardStore } from "../store";
 
 export default function TelemetryView() {
@@ -8,6 +8,11 @@ export default function TelemetryView() {
 
 function TelemetryChart() {
   const { snapshot } = useDashboardStore();
+  const [chartReady, setChartReady] = useState(false);
+
+  useEffect(() => {
+    setChartReady(false);
+  }, [snapshot]);
   const data = useMemo<any[]>(() => {
     if (!snapshot) return [];
     const s = snapshot.samples;
@@ -172,7 +177,8 @@ function TelemetryChart() {
   if (!snapshot) return <TelemetryChartSkeleton />;
 
   return (
-    <div className="telemetry-chart">
+    <div className={`telemetry-chart ${chartReady ? "telemetry-chart--ready" : ""}`} aria-busy={!chartReady}>
+      {!chartReady && <div className="telemetry-chart__loading"><span className="telemetry-chart__pulse" />Preparing telemetry workspace</div>}
       <Plot
         data={data}
         layout={layout}
@@ -184,6 +190,8 @@ function TelemetryChart() {
           scrollZoom: true,
         }}
         useResizeHandler
+        onInitialized={() => setChartReady(true)}
+        onUpdate={() => setChartReady(true)}
         style={{ width: "100%", height: "100%" }}
       />
     </div>
