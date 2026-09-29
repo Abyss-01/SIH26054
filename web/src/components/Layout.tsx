@@ -3,7 +3,7 @@ import { useDashboardStore } from "../store";
 import MissionPlayBar from "./MissionPlayBar";
 
 export default function Layout({ children }: { children: React.ReactNode }) {
-  const { snapshot, playing } = useDashboardStore();
+  const { snapshot, playing, error } = useDashboardStore();
 
   return (
     <div className="layout">
@@ -76,6 +76,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
       </aside>
 
       <main className="layout__main">
+        {error && <div className="demo-notice" role="status">{error}</div>}
         {children}
       </main>
     </div>

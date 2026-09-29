@@ -71,7 +71,37 @@ export async function listScenarios(): Promise<ScenarioListItem[]> {
 // ---- Snapshot ----
 
 export async function fetchSnapshot(request: SnapshotRequest): Promise<SnapshotResponse> {
-  return post("/api/snapshot", request);
+  const response = await post<SnapshotResponse | ServerSnapshot>("/api/snapshot", request);
+  return "samples" in response ? response : flattenSnapshot(response);
+}
+
+/** Converts the existing Python API's grouped response into the UI's flat shape. */
+interface ServerSnapshot {
+  meta: Record<string, unknown>;
+  health: Record<string, unknown>;
+  cluster: Record<string, unknown>;
+  channels: { columns: string[]; observed: SnapshotResponse["samples"]; baseline?: SnapshotResponse["samples"] };
+  anomaly: { scores: number[]; mask: boolean[]; threshold: number };
+  reference_bands: SnapshotResponse["reference_bands"];
+  rul: number | null;
+}
+
+function flattenSnapshot(source: ServerSnapshot): SnapshotResponse {
+  const meta = source.meta;
+  const health = source.health;
+  const cluster = source.cluster;
+  return {
+    scenario: meta.scenario as Scenario,
+    flight_stage: String(meta.flight_stage), flight_distance_km: Number(meta.flight_distance_km),
+    noise_level: Number(meta.noise_level), seed: Number(meta.seed), health: Number(health.score),
+    status_label: health.status as SnapshotResponse["status_label"], status_class: String(health.status_class), status_desc: String(health.description),
+    cluster_text: String(cluster.text), cluster_sub: String(cluster.sub ?? ""), cluster_color: String(cluster.color ?? ""),
+    is_outlier: Number(health.outlier_count) > 0, outlier_count: Number(health.outlier_count), outlier_fraction: Number(health.outlier_fraction),
+    severity_score: Number(health.severity), dominant_channel: String(health.dominant_channel), peak_egt_spread: Number(health.peak_egt_spread),
+    rul: source.rul, columns: source.channels.columns, samples: source.channels.observed, baseline: source.channels.baseline,
+    anomaly_scores: source.anomaly.scores, outlier_mask: source.anomaly.mask, anomaly_threshold: source.anomaly.threshold,
+    reference_bands: source.reference_bands, generated_at: String(meta.generated_at),
+  };
 }
 
 // ---- Scenario label mapping ----

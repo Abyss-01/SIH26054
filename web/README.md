@@ -28,10 +28,9 @@ Vite dev server / static build    uvicorn on Render (or any host)   (Google)
   └─ hosted on Supabase Storage ─────┘
 ```
 
-The React app and the FastAPI service are separate deployables:
-- React bundle → Supabase Storage (static hosting, shareable URL)
-- FastAPI service → Render (or any Python host)
-- Gemini key → Supabase Edge Function (Deno, server-side)
+The React app is independently shareable. It uses the FastAPI service when
+available and otherwise renders a deterministic built-in telemetry snapshot, so
+the public demo is never blank.
 
 ## Setup
 
@@ -47,8 +46,9 @@ API at the configured base URL and generate an initial snapshot on load.
 
 ## Prerequisites
 
-- A running snapshot API (the FastAPI service in `snapshot_api/`). For local
-  dev, run it alongside the React app:
+- Optional: a running snapshot API (the FastAPI service in `snapshot_api/`) for
+  live Python-generated telemetry. Without it, the dashboard uses built-in
+  demo telemetry. To run the API locally:
     ```bash
     # From the repo root:
     PYTHONPATH=. uvicorn snapshot_api.app.main:api --host 0.0.0.0 --port 8000

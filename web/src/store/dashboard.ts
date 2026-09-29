@@ -2,6 +2,7 @@ import { create } from "zustand";
 
 import type { SnapshotRequest, SnapshotResponse } from "../types";
 import { ApiError, fetchSnapshot } from "../api";
+import { createDemoSnapshot } from "../demoSnapshot";
 
 // Shared dashboard state. The React tree reads from this store; the API client
 // writes into it when a snapshot is fetched. Playback state lives here too so
@@ -53,9 +54,8 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
       const response = await fetchSnapshot(params);
       set({ snapshot: response, loading: false });
     } catch (err) {
-      const message =
-        err instanceof ApiError ? err.message : "Failed to generate telemetry";
-      set({ error: message, loading: false });
+      const message = err instanceof ApiError ? err.message : "Failed to generate telemetry";
+      set({ snapshot: createDemoSnapshot(params), error: `Live API unavailable (${message}). Showing built-in demo telemetry.`, loading: false });
     }
   },
 }));

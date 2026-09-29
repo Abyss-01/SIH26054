@@ -1,9 +1,10 @@
 # Share the AERIS demo
 
-The dashboard is a static Vite site and the telemetry generator is a small
-FastAPI service. Both need public URLs for a working shared demo.
+The dashboard is a static Vite site with built-in deterministic demo telemetry,
+so it can be shared immediately from any static host. The FastAPI service is
+optional: deploy it when you want the browser to use the Python generator.
 
-## 1. Publish the snapshot API
+## Optional: publish the snapshot API
 
 Create a Render web service from this repository using
 `snapshot_api/render.yaml`. Its build command installs the Python
@@ -18,7 +19,7 @@ ALLOWED_ORIGINS=https://your-demo.vercel.app
 You can temporarily use the final web-host URL after the web deployment. Add
 local development origins too if needed, separated by commas.
 
-## 2. Publish the Vite app
+## Publish the Vite app
 
 Import this repository into Vercel (or use the Vercel CLI), selecting `web` as
 the Root Directory. Set these settings:
@@ -28,11 +29,12 @@ the Root Directory. Set these settings:
 | Framework preset | Vite |
 | Build command | `npm run build` |
 | Output directory | `dist` |
-| Environment variable | `VITE_API_BASE_URL=https://aeris-api.onrender.com` |
+| Environment variable | Optional: `VITE_API_BASE_URL=https://aeris-api.onrender.com` |
 
 Deploy. Vercel provides a public `*.vercel.app` URL that can be sent to anyone.
-Update the API's `ALLOWED_ORIGINS` with that exact origin, then redeploy the
-API once.
+If you configured the API, update its `ALLOWED_ORIGINS` with that exact origin,
+then redeploy the API once. If no API URL is configured or reachable, the app
+shows the built-in telemetry and a small notice explaining that it is in demo mode.
 
 ## Local check
 
